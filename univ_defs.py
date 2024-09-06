@@ -9,65 +9,82 @@ class MemoryHandler(logging.Handler):
     def emit(self, record):
         self.logs.append(self.format(record))
 
-def configure_logging(basename: str, log_level: str = 'INFO', testing: bool = False) -> MemoryHandler:
+class FlushingStreamHandler(logging.StreamHandler):
+    def emit(self, record):
+        # Call the original emit method to handle the logging
+        super().emit(record)
+        # Immediately flush the stream after emitting the log
+        self.flush()
+
+def configure_logging(basename: str, log_level: str = 'INFO',
+                      testing: bool = False,
+                      flush: bool = True) -> MemoryHandler:
     """Configure logging to write to a file and the console."""
-    if logging.getLogger().hasHandlers():
-        # If logging is already configured, don't reconfigure it
+
+    root_logger = logging.getLogger()
+
+    # Check if logging is already configured
+    if any(isinstance(handler, logging.StreamHandler) for handler in root_logger.handlers):
         print("Logging is already configured.", flush=True)
-        return None
-    #logs_directory = '/tmp/logs'
-    #os.makedirs(logs_directory, exist_ok=True)
-    logs_directory = '.'
+        for handler in root_logger.handlers:
+            if isinstance(handler, MemoryHandler):
+                return handler
     
+    # Proceed with configuring logging if no MemoryHandler was found
+    #logs_directory = '/tmp/logs'
+    logs_directory = '.'
+    os.makedirs(logs_directory, exist_ok=True)
+
     now = datetime.now()
     log_base = f".{basename}-log-{now.strftime('%Y%m%d-%H%M%S')}"
-    log_info = log_base + ".out"
-    log_errors = log_base + ".err"
-    
-    logging.root.handlers = []  # Clear any existing handlers
-    
-    # Create handlers
-    debug_info_handler = logging.FileHandler(log_info)
-    debug_info_handler.setLevel(logging.DEBUG)
-    
-    warning_error_handler = logging.FileHandler(log_errors)
-    warning_error_handler.setLevel(logging.WARNING)
-    
-    console_handler = logging.StreamHandler()
+    log_info = os.path.join(logs_directory, log_base + ".out")
+    log_errors = os.path.join(logs_directory, log_base + ".err")
+
+    root_logger.handlers = []
+
+    try:
+        debug_info_handler = logging.FileHandler(log_info)
+        debug_info_handler.setLevel(logging.DEBUG)
+        warning_error_handler = logging.FileHandler(log_errors)
+        warning_error_handler.setLevel(logging.WARNING)
+    except (IOError, OSError) as e:
+        print(f"Failed to create log files: {e}", flush=True)
+        return None
+
+    console_handler = FlushingStreamHandler() if flush else logging.StreamHandler()
     console_handler.setLevel(get_log_level(log_level))
-    
+
     memory_handler = MemoryHandler()
-    memory_handler.setLevel(logging.WARNING)
-    
-    # Formatter
+    memory_handler.setLevel(logging.DEBUG)
+
     log_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     debug_info_handler.setFormatter(log_format)
     warning_error_handler.setFormatter(log_format)
     console_handler.setFormatter(log_format)
     memory_handler.setFormatter(log_format)
-    
-    # Add handlers to the root logger
-    logging.basicConfig(
-        level=get_log_level(log_level),
-        handlers=[debug_info_handler, warning_error_handler, console_handler, memory_handler]
-    )
-    
+
+    root_logger.setLevel(get_log_level(log_level))
+    root_logger.addHandler(debug_info_handler)
+    root_logger.addHandler(warning_error_handler)
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(memory_handler)
+
     if testing:
-        logging.getLogger().setLevel(logging.DEBUG)
-        logging.info(f'Logging to console with level {logging.getLevelName(get_log_level(log_level))}')
+        root_logger.setLevel(logging.DEBUG)
+        root_logger.info(f'Logging to console with level {logging.getLevelName(get_log_level(log_level))}')
     else:
-        logging.info(f'Logging to {log_info} and {log_errors} with level {logging.getLevelName(get_log_level(log_level))}')
-    
+        root_logger.info(f'Logging to {log_info} and {log_errors} with level {logging.getLevelName(get_log_level(log_level))}')
+
     return memory_handler
 
 def get_log_level(log_level: str) -> int:
     """Return the logging level based on the input string."""
-    value_map = {
-        'INFO'   : logging.INFO,
-        'DEBUG'  : logging.DEBUG,
-        'WARNING': logging.WARNING,
-        'WARN'   : logging.WARNING,
-    }
+    value_map = {'INFO'     : logging.INFO,
+                 'DEBUG'    : logging.DEBUG,
+                 'WARNING'  : logging.WARNING,
+                 'WARN'     : logging.WARNING,
+                 'ERROR'    : logging.ERROR,
+                 'CRITICAL' : logging.CRITICAL}
     return value_map.get(log_level, logging.INFO)
 
 def get_user_input(prompt: str) -> bool:
@@ -168,17 +185,31 @@ def prettyprint_timespan(timespan: float) -> None:
 
     print(f"The script took {time_str} to run.")
 
-def open_dir_in_VLC(the_dir: str, sort_choice: str) -> None:
+def open_dir_in_VLC(the_dir: str, sort_choice: str,
+                    recursive: bool = False) -> None:
     """Recursively open the files in the directory in VLC, sorted by name or modification time."""
     # List to store files with their modification times
     files_with_times = []
-    # Recursively iterate over the files in the directory
-    for root, dirs, files in os.walk(the_dir):
-        for filename in files:
-            file_path = os.path.join(root, filename)
-            if os.path.isfile(file_path):
-                mod_time = os.path.getmtime(file_path)
-                files_with_times.append((mod_time, file_path))
+    if recursive:
+        # Recursively iterate over the files in the directory
+        for root, dirs, files in os.walk(the_dir):
+            for filename in files:
+                file_path = os.path.join(root, filename)
+                if os.path.isfile(file_path):
+                    mod_time = os.path.getmtime(file_path)
+                    files_with_times.append((mod_time, file_path))
+    else:
+        for item in os.listdir(the_dir):
+            item_path = os.path.join(the_dir, item)
+            if os.path.isfile(item_path):
+                mod_time = os.path.getmtime(item_path)
+                files_with_times.append((mod_time, item_path))
+            elif os.path.isdir(item_path):
+                mod_time = os.path.getmtime(item_path)
+                files_with_times.append((mod_time, item_path))
+            else:
+                print(f"Skipping {item_path} as it is not a file or directory.")
+
     if sort_choice == "sort_by_name":
         # Sort files by name
         files_with_times.sort(key=lambda x: x[1])
