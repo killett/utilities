@@ -6,75 +6,55 @@ class MemoryHandler(logging.Handler):
     def __init__(self):
         super().__init__()
         self.logs = []
+
     def emit(self, record):
         self.logs.append(self.format(record))
 
-class FlushingStreamHandler(logging.StreamHandler):
-    def emit(self, record):
-        # Call the original emit method to handle the logging
-        super().emit(record)
-        # Immediately flush the stream after emitting the log
-        self.flush()
-
-def configure_logging(basename: str, log_level: str = 'INFO',
-                      testing: bool = False,
-                      flush: bool = True) -> MemoryHandler:
+def configure_logging(basename: str, log_level: str = 'INFO', testing: bool = False) -> MemoryHandler:
     """Configure logging to write to a file and the console."""
-
-    root_logger = logging.getLogger()
-
-    # Check if logging is already configured
-    if any(isinstance(handler, logging.StreamHandler) for handler in root_logger.handlers):
-        print("Logging is already configured.", flush=True)
-        for handler in root_logger.handlers:
-            if isinstance(handler, MemoryHandler):
-                return handler
-    
-    # Proceed with configuring logging if no MemoryHandler was found
     #logs_directory = '/tmp/logs'
+    #os.makedirs(logs_directory, exist_ok=True)
     logs_directory = '.'
-    os.makedirs(logs_directory, exist_ok=True)
-
+    
     now = datetime.now()
     log_base = f".{basename}-log-{now.strftime('%Y%m%d-%H%M%S')}"
-    log_info = os.path.join(logs_directory, log_base + ".out")
-    log_errors = os.path.join(logs_directory, log_base + ".err")
-
-    root_logger.handlers = []
-
-    try:
-        debug_info_handler = logging.FileHandler(log_info)
-        debug_info_handler.setLevel(logging.DEBUG)
-        warning_error_handler = logging.FileHandler(log_errors)
-        warning_error_handler.setLevel(logging.WARNING)
-    except (IOError, OSError) as e:
-        print(f"Failed to create log files: {e}", flush=True)
-        return None
-
-    console_handler = FlushingStreamHandler() if flush else logging.StreamHandler()
+    log_info = log_base + ".out"
+    log_errors = log_base + ".err"
+    
+    logging.root.handlers = []  # Clear any existing handlers
+    
+    # Create handlers
+    debug_info_handler = logging.FileHandler(log_info)
+    debug_info_handler.setLevel(logging.DEBUG)
+    
+    warning_error_handler = logging.FileHandler(log_errors)
+    warning_error_handler.setLevel(logging.WARNING)
+    
+    console_handler = logging.StreamHandler()
     console_handler.setLevel(get_log_level(log_level))
-
+    
     memory_handler = MemoryHandler()
-    memory_handler.setLevel(logging.DEBUG)
-
+    memory_handler.setLevel(logging.WARNING)
+    
+    # Formatter
     log_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     debug_info_handler.setFormatter(log_format)
     warning_error_handler.setFormatter(log_format)
     console_handler.setFormatter(log_format)
     memory_handler.setFormatter(log_format)
-
-    root_logger.setLevel(get_log_level(log_level))
-    root_logger.addHandler(debug_info_handler)
-    root_logger.addHandler(warning_error_handler)
-    root_logger.addHandler(console_handler)
-    root_logger.addHandler(memory_handler)
-
+    
+    # Add handlers to the root logger
+    logging.basicConfig(
+        level=get_log_level(log_level),
+        handlers=[debug_info_handler, warning_error_handler, console_handler, memory_handler]
+    )
+    
     if testing:
-        root_logger.setLevel(logging.DEBUG)
-        root_logger.info(f'Logging to console with level {logging.getLevelName(get_log_level(log_level))}')
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.info(f'Logging to console with level {logging.getLevelName(get_log_level(log_level))}')
     else:
-        root_logger.info(f'Logging to {log_info} and {log_errors} with level {logging.getLevelName(get_log_level(log_level))}')
-
+        logging.info(f'Logging to {log_info} and {log_errors} with level {logging.getLevelName(get_log_level(log_level))}')
+    
     return memory_handler
 
 def get_log_level(log_level: str) -> int:
