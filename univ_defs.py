@@ -71,9 +71,8 @@ class MaxLevelFilter(logging.Filter):
         return record.levelno <= self.max_level
     
 def configure_logging(basename: str, log_level: str = 'INFO',
-                      testing: bool = False,
-                      flush: bool = True) -> MemoryHandler:
-    """Configure logging to write INFO logs to stdout and ERROR logs to stderr."""
+                      rawlog: bool = False) -> MemoryHandler:
+    """Configure logging to write to files and stdout/stderr, and return a MemoryHandler to capture ERROR logs for later (duplicate) printing."""
     
     root_logger = logging.getLogger()
 
@@ -86,7 +85,7 @@ def configure_logging(basename: str, log_level: str = 'INFO',
 
     # Proceed with configuring logging if no MemoryHandler was found
     #logs_directory = '/tmp/logs'
-    logs_directory = '.'
+    logs_directory = os.getcwd()
     os.makedirs(logs_directory, exist_ok=True)
 
     now = datetime.now()
@@ -117,7 +116,12 @@ def configure_logging(basename: str, log_level: str = 'INFO',
 
     memory_handler = MemoryHandler(level=logging.ERROR)  # Only capture ERROR level logs
 
-    log_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    # Define the formatter based on the no_prefix parameter
+    if rawlog:
+        log_format = logging.Formatter('%(message)s')
+    else:
+        log_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
     debug_info_handler.setFormatter(log_format)
     warning_error_handler.setFormatter(log_format)
     console_handler_stdout.setFormatter(log_format)
@@ -130,12 +134,7 @@ def configure_logging(basename: str, log_level: str = 'INFO',
     root_logger.addHandler(console_handler_stdout)
     root_logger.addHandler(console_handler_stderr)
     root_logger.addHandler(memory_handler)
-
-    if testing:
-        root_logger.setLevel(logging.DEBUG)
-        root_logger.info(f'Logging to console with level {logging.getLevelName(get_log_level(log_level))}')
-    else:
-        root_logger.info(f'Logging to {log_info} and {log_errors} with level {logging.getLevelName(get_log_level(log_level))}')
+    if not rawlog: root_logger.info(f'Logging to {log_info} and {log_errors} with level {logging.getLevelName(get_log_level(log_level))}')
 
     return memory_handler
 
@@ -380,7 +379,7 @@ def prettyprint_timespan(timespan: float) -> None:
 def open_dir_in_VLC(the_dir: str, sort_choice: str = "sort_by_name",
                     recursive: bool = False,
                     no_start: bool = False) -> None:
-    """Create a playlist of the files in the specified directory, then play that playlist in VLC. By default, don't search the directory recursively and sort the files by name. But optional arguments allow recursive loading or sorting by modification time. If no_start is True, don't start playback in VLC."""
+    """Create a playlist of the files in the specified directory, then play that playlist in VLC. By default, don't search the directory recursively and sort the files by name. Optional arguments allow recursive loading or sorting by modification time. If no_start is True, don't start playback in VLC."""
     #start_flag = "--start-paused" if no_start else ""
     start_flag = "--no-playlist-autostart" if no_start else ""
     # List to store files with their modification times
@@ -421,4 +420,6 @@ def open_dir_in_VLC(the_dir: str, sort_choice: str = "sort_by_name",
     with open(playlist_path, "w") as playlist_file:
         playlist_file.write(playlist_content)
     # Open the playlist in VLC
-    subprocess.Popen(["vlc", start_flag, playlist_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if start_flag: command_list = ["vlc", start_flag, playlist_path]
+    else:          command_list = ["vlc",             playlist_path]
+    subprocess.Popen(command_list, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
