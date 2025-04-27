@@ -27,6 +27,18 @@ class univ_class:
     def import_test(self) -> None:
         import openai
 
+def parse_date(date_str: str) -> 'dt.datetime':
+    """Try parsing the given date string in multiple formats. Once a format works, return the datetime object. If none of the formats work, raise a ValueError. If the date string is 'NOW', return the current datetime."""
+    import datetime as dt
+    if date_str.upper() == "NOW":
+        return dt.datetime.now()
+    for fmt in ("%Y", "%Y-%m", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return dt.datetime.strptime(date_str, fmt)
+        except ValueError:
+            pass
+    raise ValueError(f"The date '{date_str}' is in an unknown format. Please use NOW, YYYY, YYYY-MM, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS.")
+
 def sci_exp(float_input: float) -> int:
     """Return the scientific exponent of a float."""
     import math
@@ -725,6 +737,7 @@ def check_list_for_duplicates(the_list: list) -> bool:
     """Check a list for duplicate elements and return True if duplicates are found."""
     duplicates = [ext for ext in set(the_list) if the_list.count(ext) > 1]
     print("Duplicates:", duplicates)
+    return len(duplicates) > 0
 
 # A comprehensive list of video file extensions.
 video_extensions = [
