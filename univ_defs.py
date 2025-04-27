@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Written by Emmy Killett, ChatGPT 4o, ChatGPT o1-preview, and GitHub Copilot.
+# Written by Emmy Killett (she/her), ChatGPT 4o (it/its), ChatGPT o1-preview (it/its), ChatGPT o3-mini-high (it/its), and GitHub Copilot (it/its).
 import os, sys, subprocess
 import logging
 from typing import Dict, Optional, TextIO
@@ -737,7 +737,6 @@ def check_list_for_duplicates(the_list: list) -> bool:
     """Check a list for duplicate elements and return True if duplicates are found."""
     duplicates = [ext for ext in set(the_list) if the_list.count(ext) > 1]
     print("Duplicates:", duplicates)
-    return len(duplicates) > 0
 
 # A comprehensive list of video file extensions.
 video_extensions = [
