@@ -8,8 +8,10 @@ import logging
 from typing import TextIO, Any, TypeAlias, Type
 import re  # Used to precompile regexes for performance
 
+print("REPLACE ALL WRITE AND APPEND STATEMENTS WITH ud.atomic_write() AND ud.atomic_append() RESPECTIVELY! OH, AND WRITE ud.atomic_append() SO IT CAN BE USED!!!")
+
 # This is the version of univ_defs.py
-__version__ = '0.1.6'
+__version__ = '0.1.7'
 
 # This is the version of python which should be used in scripts that import this module.
 PY_VERSION = 3.11
@@ -228,7 +230,7 @@ class MaxLevelFilter(logging.Filter):
         return record.levelno <= self.max_level
 
 
-def fallback_logging_config(level: str = 'INFO', rawlog: bool = False) -> None:
+def fallback_logging_config(log_level: int | str = 'INFO', rawlog: bool = False) -> None:
     """
     Configure the root logger with a basic configuration if no handlers are set.
     Run this at the start of functions which might be run without first configuring logging.
@@ -239,14 +241,14 @@ def fallback_logging_config(level: str = 'INFO', rawlog: bool = False) -> None:
     """
     if not logging.getLogger().handlers:
         if not rawlog:  # Use a full logging format with timestamps and levels.
-            logging.basicConfig(level=get_log_level(level),
+            logging.basicConfig(level=log_level,
                                 format="%(asctime)s %(name)s %(levelname)s: %(message)s",
                                 datefmt="%Y-%m-%d %H:%M:%S")
         else:  # rawlog is True, so use a simple format without timestamps or levels.
-            logging.basicConfig(level=get_log_level(level), format="%(message)s")
+            logging.basicConfig(level=log_level, format="%(message)s")
 
 
-def configure_logging(basename: str, log_level: str = 'INFO',
+def configure_logging(basename: str, log_level: int | str = 'INFO',
                       rawlog: bool = False, logdir: str = '') -> MemoryHandler:
     """Configure logging to write to files and stdout/stderr, and return a MemoryHandler to capture ERROR logs for later (duplicate) printing."""
     import datetime as dt
@@ -304,33 +306,24 @@ def configure_logging(basename: str, log_level: str = 'INFO',
     console_handler_stderr.setFormatter(log_format)
     memory_handler.setFormatter(log_format)
 
-    root_logger.setLevel(get_log_level(log_level))
+    root_logger.setLevel(log_level)
     root_logger.addHandler(debug_info_handler)
     root_logger.addHandler(warning_error_handler)
     root_logger.addHandler(console_handler_stdout)
     root_logger.addHandler(console_handler_stderr)
     root_logger.addHandler(memory_handler)
-    if not rawlog: root_logger.info(f'Logging to {log_info} and {log_errors} with level {logging.getLevelName(get_log_level(log_level))}')
+    if not rawlog: root_logger.info(f'Logging to {log_info} and {log_errors} with level {logging.getLevelName(root_logger.level)}')
 
     return memory_handler
-
-
-def get_log_level(log_level: str) -> int:
-    """Return the logging level based on the input string."""
-    value_map = {'INFO'     : logging.INFO,
-                 'DEBUG'    : logging.DEBUG,
-                 'WARNING'  : logging.WARNING,
-                 'WARN'     : logging.WARNING,
-                 'ERROR'    : logging.ERROR,
-                 'CRITICAL' : logging.CRITICAL}
-    return value_map.get(log_level, logging.INFO)
 
 
 def print_all_errors(memory_handler: MemoryHandler,
                      rawlog: bool = False) -> None:
     """Print all the captured error messages."""
     if memory_handler.logs and not rawlog:
-        print("\n****************************\n****************************\nError messages:")
+        print("\n******************************\n"
+              "******************************\n"
+              "All Error messages from above:")
         for log in memory_handler.logs:
             print(log)
 
@@ -371,7 +364,7 @@ def my_popen(command_list: list, suppress_info: bool = False,
     """Execute a command using subprocess.Popen and capture the output line by line using threads."""
     import threading
     import subprocess
-    fallback_logging_config(level='INFO' if not suppress_info else 'ERROR')
+    fallback_logging_config(log_level='INFO' if not suppress_info else 'ERROR')
     command_list_str = [str(item) for item in command_list]
     the_statement = "Executing command: " + ' '.join(command_list_str)
 
@@ -438,7 +431,7 @@ def my_popen(command_list: list, suppress_info: bool = False,
 def my_fopen(file_path: str, suppress_errors: bool = False,
              rawlog: bool = False, numlines: int | None = None) -> TextIO | bool | str:
     """Attempt to read the file with various encodings and return the file content if successful. Optionally, specify numlines to limit the number of lines read and return a string instead of a file object."""
-    fallback_logging_config(level='INFO' if not suppress_errors else 'CRITICAL')
+    fallback_logging_config(log_level='INFO' if not suppress_errors else 'CRITICAL')
 
     if not os.path.isfile(file_path):
         this_message = f"File does not exist: {file_path}"
@@ -478,6 +471,7 @@ def my_fopen(file_path: str, suppress_errors: bool = False,
                     file_content = file.read()
                 else:
                     file_content = ''.join(file.readline() for _ in range(numlines))
+            logging.debug(f"Successfully read {file_path} with encoding {encoding}")
             return file_content  # Exit the function if reading is successful
         except UnicodeDecodeError:
             this_message = f"Unicode decode error with encoding {encoding} reading file {file_path}"
@@ -1342,7 +1336,20 @@ def sci_exp(float_input: float | int, max_digits: int = 15) -> int:
 
 
 def round_out(x: float, round_digits: int = 3, max_digits: int = 15) -> float:
-    """Round a number away from zero (i.e. rounds up for x>0 and down for x<0) to the specified number of significant figures (defaults to 3). If the number is smaller than 10^(-max_digits), it will be returned as is. The max_digits parameter defaults to 15, but can be changed to a different value if needed."""
+    """
+    Round a number away from zero (i.e. rounds up for x>0 and down for x<0) to
+    the specified number of significant figures (defaults to 3).
+    If the number is smaller than 10^(-max_digits), it will be returned as is.
+    The max_digits parameter defaults to 15, but can be changed to a different value if needed.
+
+    Parameters:
+        x            : The number to round.
+        round_digits : The number of significant figures to round to (default is 3).
+        max_digits   : The maximum number of digits to consider for very small numbers (default is 15).
+
+    Returns:
+        float : The rounded number, or the original number if it is smaller than 10^(-max_digits).
+    """
     import numpy as np
     if np.abs(x) < 10**(-max_digits): return x
     these_digits = sci_exp(x) - round_digits + 1
@@ -1353,14 +1360,24 @@ def round_out(x: float, round_digits: int = 3, max_digits: int = 15) -> float:
     return x*(thisfactor*1.0)
 
 
-def get_user_input(prompt: str) -> bool:
+def prompt_then_confirm(prompt: str) -> bool:
     """Prompt the user with the given message and return True if the user enters 'yes', False otherwise."""
-    user_input = input(prompt)
-    return user_input.casefold() == 'yes' or user_input.casefold() == 'y'
+    confirmation = input(prompt)
+    return confirmation.casefold() == 'yes' or confirmation.casefold() == 'y'
 
 
-def prompt_choice(prompt: str, choices: list[str], default: str = None) -> str:
-    """Simple numbered prompt."""
+def prompt_then_choose(prompt: str, choices: list[str], default: str = None) -> str:
+    """
+    Show a numbered list of choices and prompt the user to select one.
+
+    Parameters:
+        prompt : The message to display before the choices.
+        choices : A list of choices to present to the user.
+        default : The default choice to return if the user presses Enter without inputting a choice.
+
+    Returns:
+        str : The selected choice from the list (or the default if provided).
+    """
     fallback_logging_config()
 
     logging.info(prompt)
@@ -1457,25 +1474,63 @@ def filename_format(text: str, sep: str = "_", max_length: int = None) -> str:
     return text
 
 
-def compile_code(source: str) -> bool:
-    """Attempt to compile the given source code in 'exec' mode. If it compiles, return True. On syntax or I/O problems, log an error and return False."""
+def if_filepath_then_read(input_string_or_filepath: str,
+                          force_string: bool = False) -> str:
+    """
+    If 'input_string_or_filepath' is a file path, read its contents and return as a string. If not, return the input_string as is.
+
+    Parameters:
+        input_string_or_filepath : The source can be a file path or a string.
+        force_string : If True, treat 'input_string_or_filepath' as a string even if it looks like a file path.
+
+    Returns:
+        str : The contents of the file if input_string is a file path, or the input_string itself if it is not a file path.
+
+    Raises:
+        TypeError : If input_string is not a string or a file path.
+    """
     fallback_logging_config()
-    # Is "source" a file path? If so, read it first.
-    if os.path.isfile(source):
-        file_path = source
+    # Is "input_string" a file path, and is "force_string" False?
+    # If so, read the file contents.
+    if os.path.isfile(input_string_or_filepath) and not force_string:
+        file_path = input_string_or_filepath
         try:
-            source = my_fopen(file_path, suppress_errors=True)
-            if not source:
+            contents = my_fopen(file_path, suppress_errors=True)
+            if not contents:
                 logging.error(f"Could not read file: {file_path}")
+                return ""
+            return contents
         except FileNotFoundError:
             logging.error(f"File not found: {file_path}")
         except PermissionError:
             logging.error(f"Permission denied: {file_path}")
         except UnicodeDecodeError as e:
             logging.error(f"Could not decode {file_path!r}: {e}")
-    else:  # Otherwise, treat "source" as a string containing Python code.
-        if not isinstance(source, str):
-            raise TypeError(f"Expected 'source' to be a string or file path, got {type(source).__name__!r}")
+    else:  # Otherwise, treat "input_string" as a string.
+        if not isinstance(input_string_or_filepath, str):
+            raise TypeError(f"Expected 'input_string_or_filepath' to be a string or file path, got {type(input_string_or_filepath).__name__!r}")
+        return input_string_or_filepath  # Just return the input string as is.
+
+
+def compile_code(source_or_filepath: str,
+                 force_source: bool = False) -> bool:
+    """
+    Attempt to compile the given source code in 'exec' mode.
+    If 'source_or_filepath' is a file path, read its contents first.
+
+    Parameters:
+        source_or_filepath : The source code string or file path to compile.
+        force_source : If True, treat 'source_or_filepath' as a source code string even if it looks like a file path.
+
+    Returns:
+        bool : True if compilation succeeds, False if it fails with a SyntaxError or other exception
+    """
+    fallback_logging_config()
+    # Read from file if source is a file path
+    source = if_filepath_then_read(source_or_filepath, force_string=force_source)
+    if source != source_or_filepath:
+        file_path = source_or_filepath
+    else:
         # If it's a string, we need to provide a dummy file path for the compiler.
         # This is just to satisfy the compiler, it won't be used.
         file_path = "<string>"
@@ -1529,9 +1584,10 @@ def _make_format_checker() -> Type[FormatChecker]:
         - missing docstring or incorrect docstring quote style
         """
 
-        def __init__(self, source: str) -> None:
+        def __init__(self, source: str, doc_style: str = "None") -> None:
             """Initialize the FormatChecker with the source code string."""
             self.source = source
+            self.doc_style = doc_style # "None", "NumPy", "Google", "reStructuredText"
             self.errors: list[tuple[str, str, str, int]] = []
             self._seen_funcs: set[int] = set()  # keep track of which FunctionDef/AsyncFunctionDef nodes we've already checked
 
@@ -1582,26 +1638,114 @@ def _make_format_checker() -> Type[FormatChecker]:
             if node.returns is None:
                 missing.append("return")
             if missing:
-                self.errors.append(("function", node.name, "missing type hints for " + ", ".join(missing), node.lineno))
+                self.errors.append(("function", node.name,
+                                    "missing type hints for " + ", ".join(missing),
+                                    node.lineno))
 
         def _check_docstring(self, node: ast.AST, who: str) -> None:
-            """Check a node for a docstring and its formatting.
-            If the node has no docstring or the docstring is not formatted correctly, an error is added to self.errors.
-            The 'who' parameter is a string describing the context (e.g. function or class name)."""
+            """
+            Check a node for a docstring and its formatting.
+            An error is added to self.errors if:
+              - The node has no docstring
+              - The docstring is not formatted correctly
+              - There is more than one docstring
+            The 'who' parameter is a string describing the context (e.g. function or class name).
+            """
             if not node.body or not isinstance(node.body[0], ast.Expr):
-                self.errors.append((node.__class__.__name__.lower(), who, "no docstring", node.lineno))
+                self.errors.append((node.__class__.__name__.lower(), who, "no docstring",
+                                    node.lineno))
                 return
 
             expr = node.body[0]
             if not (isinstance(expr.value, ast.Constant) and isinstance(expr.value.value, str)):
-                self.errors.append((node.__class__.__name__.lower(), who, "no docstring", node.lineno))
+                self.errors.append((node.__class__.__name__.lower(), who, "no docstring",
+                                    node.lineno))
                 return
 
-            # recover the exact literal to verify triple-double-quote
+            # Recover the exact literal to verify triple-double-quote
             literal = ast.get_source_segment(self.source, expr.value) or ""
             first_line = literal.strip().splitlines()[0]
             if first_line.startswith("'''"):
-                self.errors.append((node.__class__.__name__.lower(), who, 'docstring should use triple double quotes ("""…""")', node.lineno))
+                self.errors.append((node.__class__.__name__.lower(), who,
+                                    'docstring should use triple double quotes ("""…""")',
+                                    node.lineno))
+
+            # Now scan for any extra standalone triple‐quoted strings
+            for extra in node.body[1:]:
+                # Only look at Exprs, i.e. un‐assigned string literals
+                if  isinstance(extra, ast.Expr) \
+                and isinstance(extra.value, ast.Constant) \
+                and isinstance(extra.value.value, str):
+                    literal = ast.get_source_segment(self.source, extra.value) or ""
+                    first = literal.strip().splitlines()[0]
+                    # If it starts with triple quotes, it’s an extra docstring
+                    if first.startswith(('"""', "'''")):
+                        self.errors.append((node.__class__.__name__.lower(),
+                                            who, "extra docstring", extra.lineno))
+
+            # Check the docstring style
+            self._check_docstring_style(node, who)
+
+        def _check_docstring_style(self, node: ast.AST, who: str) -> None:
+            """Dispatch to the style‑specific docstring checker."""
+            if not self.doc_style or self.doc_style.casefold() == "none":
+                return
+            checker = {
+                "NumPy"              : self._check_numpy_docstring,
+                # "Google"           : self._check_google_docstring,
+                # "reStructuredText" : self._check_rst_docstring,
+            }.get(self.doc_style)
+
+            if checker is not None:
+                checker(node, who)
+
+        def _check_numpy_docstring(self, node: ast.AST, who: str) -> None:
+            """
+            Very basic NumPy‑style docstring validator:
+            - must have a 'Parameters' and 'Returns' section header
+            - every non‑self arg must be listed under Parameters
+            """
+            # Get the cleaned docstring
+            doc = ast.get_docstring(node)
+            if not doc:
+                return  # already flagged as missing
+
+            lines = doc.splitlines()
+            # Locate the section headers
+            try:
+                params_idx = next(i for i, L in enumerate(lines) if L.strip() == "Parameters")
+            except StopIteration:
+                self.errors.append((node.__class__.__name__.lower(), who,
+                                    "NumPy docstring missing 'Parameters' section",
+                                    node.lineno))
+                return
+
+            try:
+                returns_idx = next(i for i, L in enumerate(lines) if L.strip() == "Returns")
+            except StopIteration:
+                self.errors.append((node.__class__.__name__.lower(), who,
+                                    "NumPy docstring missing 'Returns' section",
+                                    node.lineno))
+
+            # Collect documented params: lines immediately under 'Parameters'
+            documented = set()
+            for line in lines[params_idx+1:]:
+                if not line.strip():
+                    break
+                m = re.match(r'^(\w+)\s*:\s*(.+)$', line)
+                if m:
+                    documented.add(m.group(1))
+
+            # Get function args (excluding self)
+            sig_args = []
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                sig_args = [a.arg for a in node.args.args if a.arg != "self"]
+
+            missing = [a for a in sig_args if a not in documented]
+            if missing:
+                self.errors.append((node.__class__.__name__.lower(), who,
+                                    "NumPy docstring missing parameter(s): " + ", ".join(missing), node.lineno))
+
     return FormatChecker
 
 
@@ -2242,74 +2386,193 @@ def verify_script(thepath: str, thescript: str) -> None:
     # else: contents match exactly, nothing to do
 
 
-def is_valid_utf8(path: str) -> bool:
-    """Return True if the file at `path` can be read as UTF-8 without errors."""
+def decode_utf8(raw_bytes: bytes, path: str = "input string") -> str | None:
+    """
+    If the file at `path` is valid UTF-8 without lone C1 controls,
+    return the decoded string. Otherwise, return None.
+    """
+    fallback_logging_config()
     try:
-        with open(path, 'rb') as f:
-            f.read().decode('utf-8')
-        return True
+        text = raw_bytes.decode('utf-8', errors='strict')
     except UnicodeDecodeError:
-        return False
+        logging.debug(f"{path} failed to decode as UTF‑8.")
+        return None
+    if any(0x0080 <= ord(ch) <= 0x009F for ch in text):
+        logging.debug(f"{path} contains lone C1 controls, not valid UTF-8.")
+        return None
+    logging.debug(f"{path} decoded as valid UTF‑8.")
+    return text
 
 
-# THIS IS TOO GENERAL! IT CAN FALSE-POSITIVE ON VALID UTF-8 TEXT WITH APOSTROPHES OR QUOTES
-# def contains_mojibake(text: str) -> bool:
-#     """Use ftfy.badness.is_bad() to detect any likely mojibake in the text."""
-#     import ftfy
-#     return ftfy.badness.is_bad(text)
-# I HAVEN'T TRIED THIS NEXT LINE, BUT IT MIGHT CAUSE FEWER FALSE POSITIVES:
-#     return ftfy.badness(text) > 1
+def decode_cp1252(raw_bytes: bytes, path: str = "input string") -> str | None:
+    """
+    Attempt to decode CP1252 bytes and return as a string.
+    If it fails, return None.
+    """
+    fallback_logging_config()
+    try:
+        text = raw_bytes.decode('cp1252', errors='strict')
+        logging.debug(f"{path} decoded as valid CP1252.")
+        return text
+    except UnicodeDecodeError as e:
+        logging.debug(f"{path} failed to decode as CP1252: {e!r}")
+        return None
 
 
 def contains_mojibake(text: str) -> bool:
-    """Check for common mojibake patterns like “Â“” or “Â”."""
-    return '\u00C2' in text or '\u00C3' in text
+    """Use ftfy.badness.is_bad() to detect any likely mojibake in the text."""
+    import ftfy
+    fallback_logging_config()
+    try:
+        mojibake_present = ftfy.badness.is_bad(text)
+    except Exception as e:
+        logging.debug(f"Failed to check for mojibake: {e}")
+        mojibake_present = False
+    logging.debug(f"Mojibake present: {mojibake_present}")
+    # I HAVEN'T TRIED THIS NEXT LINE, BUT IT MIGHT CAUSE FEWER FALSE POSITIVES:
+    # return ftfy.badness(text) > 1
+    return mojibake_present
 
 
-def fix_file(path: str, make_backup: bool = True, dry_run: bool = False) -> bool:
+def fix_text(current_text: str, path: str, raw_bytes: bytes) -> str | None:
     """
-    Fix mojibake in an existing UTF-8 text file using ftfy.fix_encoding().
-    Returns True if a fix was applied.
+    Fix mojibake in a string using ftfy.fix_encoding().
     """
     import ftfy
-    with open(path, 'r', encoding='utf-8', errors='strict') as f:
-        original = f.read()
-    if not contains_mojibake(original):
-        return False
-    if dry_run:
-        logging.info(f"[DRY RUN] Would fix mojibake in: {path}")
-        return True
-    fixed = ftfy.fix_encoding(original)
-    if make_backup:
-        os.rename(path, path + '.bak')
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(fixed)
-    return True
-
-
-def recode_cp1252_to_utf8(path: str, make_backup: bool = True,
-                          dry_run: bool = False) -> bool:
-    """
-    Assume a non-UTF-8 file is Windows-1252, decode it, and re-save as UTF-8.
-    Returns True if successful.
-    """
-    raw = open(path, 'rb').read()
+    fallback_logging_config()
+    logging.debug(f"Checking {path} for mojibake.")
+    if not contains_mojibake(current_text):
+        return None
     try:
-        text = raw.decode('cp1252', errors='strict')
-    except UnicodeDecodeError:
-        logging.warning(f"File {path} is not valid UTF-8 or CP1252, skipping.")
-        return False
+        fixed = ftfy.fix_encoding(current_text)
+    except Exception as e:
+        logging.error(f"Failed to fix mojibake in {path}: {e}")
+        return None
+    # If logging level is set to DEBUG, show my diff of original vs fixed:
+    if logging.getLogger().isEnabledFor(logging.DEBUG):
+        try:
+            # Mangle the original string to simulate browser encoding issues:
+            mangled_original = raw_bytes.decode('cp1252', errors='replace')
+            my_diff(mangled_original, fixed, path)
+        except Exception as e:
+            logging.debug(f"Could not simulate browser mangling: {e}")
+    return fixed
 
-    if dry_run:
-        logging.info(f"[DRY RUN] Would recode CP1252→UTF-8: {path}")
-        return True
 
-    if make_backup:
-        os.rename(path, path + '.bak')
-    with open(path, 'w', encoding='utf-8') as f:
-        f.write(text)
-    return True
+def ensure_utf8_meta(fixed: str) -> str:
+    """
+    Ensure the HTML text has a <meta charset="utf-8"> tag.
+    If it does not, insert it right after the <head> tag.
+    Either way, return the modified (or unmodified) HTML string.
+    """
+    if re.search(r'<meta[^>]+charset=', fixed, flags=re.IGNORECASE):
+        # Replace any existing charset
+        fixed = re.sub(r'(<meta[^>]+charset=)[^"\'>]+',
+                      r'\1utf-8', fixed, flags=re.IGNORECASE)
+    else:
+        # Insert a new <meta charset> right after <head>
+        fixed = re.sub(r'(<head[^>]*>)',
+                      r'\1\n    <meta charset="utf-8">',
+                      fixed, count=1, flags=re.IGNORECASE)
+    return fixed
 
+
+def ensure_utf8_meta(html: str) -> str:
+    """
+    Ensure the HTML text has a <meta charset="utf-8"> tag.
+    If one already exists—either as a charset attribute or
+    as an http-equiv Content-Type declaration—normalize it to
+    <meta charset="utf-8">. Otherwise, insert that tag right
+    after the opening <head> tag.
+    """
+    # 1) Normalize any <meta ... charset=...> to <meta charset="utf-8">
+    #    This covers both <meta charset="XYZ"> and
+    #    <meta http-equiv="Content-Type" content="text/html; charset=XYZ">
+    def _replace_charset_attr(match: re.Match) -> str:
+        """
+        Replace a <meta> tag with a charset attribute
+        with a normalized <meta charset="utf-8"> tag.
+        """
+        # Always produce exactly: <meta charset="utf-8">
+        return '<meta charset="utf-8">'
+    
+    # Pattern A: <meta ... charset=XYZ ...>
+    pattern_a = r'<meta\b[^>]*\bcharset=["\']?[^"\'>\s]+["\']?[^>]*>'
+    # Pattern B: <meta ... http-equiv=["\']Content-Type["\'] ... content="...; charset=XYZ"...>
+    pattern_b = (r'<meta\b[^>]*\bhttp-equiv=["\']?Content-Type["\']?[^>]*'
+                 r'\bcontent=["\'][^"\'>]*;\s*charset=[^"\'>]+["\'][^>]*>')
+
+    if re.search(pattern_a, html, flags=re.IGNORECASE) or \
+       re.search(pattern_b, html, flags=re.IGNORECASE):
+        # First collapse any Pattern B occurrences
+        html = re.sub(pattern_b, _replace_charset_attr, html, flags=re.IGNORECASE)
+        # Then collapse any remaining Pattern A
+        html = re.sub(pattern_a, _replace_charset_attr, html, flags=re.IGNORECASE)
+        return html
+
+    # 2) If no existing meta‐charset, insert one just after <head>
+    return re.sub(r'(<head\b[^>]*>)',
+                  r'\1\n    <meta charset="utf-8">',
+                  html, count=1, flags=re.IGNORECASE)
+
+
+def atomic_write(path: str, data: str, encoding: str = DEFAULT_ENCODING) -> None:
+    """
+    Atomically write `data` to `path` using a temp file + os.replace().
+    Will fsync the file before replacing to ensure it’s on disk.
+    If `path` exists, it will preserve its original permissions.
+    If `path` does not exist, it will be created with default permissions.
+    If an error occurs, the temp file will be removed.
+    This function is useful for ensuring that the file is written atomically,
+    meaning that if the write fails, the original file remains unchanged.
+
+    Parameters:
+    - `path`: The file path to write to.
+    - `data`: The data to write to the file.
+    - `encoding`: The encoding to use when writing the file.
+
+    Returns:
+    None. If the write is successful, the file at `path` will be replaced with `data`.
+    If an error occurs, the temp file will be removed and an exception will be raised.
+
+    Raises:
+    - `OSError`: If there is an error during the file operations.
+    """
+    import tempfile
+    # If a file at `path` exists, preserve its original permissions.
+    try:
+        # In Unix-style permissions, the lower 9 bits of the mode
+        # represent the permissions for user, group, and others.
+        # We use os.stat() to get the file's mode and mask it with 0o777
+        # to extract just the permission bits.
+        orig_mode = os.stat(path).st_mode & 0o777
+    except FileNotFoundError:
+        orig_mode = None
+
+    dir_name, base_name = os.path.dirname(path), os.path.basename(path)
+    dir_name = dir_name or "."  # when path has no directory component
+    os.makedirs(dir_name, exist_ok=True)  # ensure the directory exists
+    # Create a temp file in the same directory
+    fd, tmp_path = tempfile.mkstemp(prefix=base_name, dir=dir_name)
+    # Open it via the fd so we can fsync()
+    with os.fdopen(fd, 'w', encoding=encoding) as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    # Restore the original permissions if we had them
+    if orig_mode is not None:
+        os.chmod(tmp_path, orig_mode)
+    try:
+        # Atomically replace the target
+        os.replace(tmp_path, path)
+    except OSError:
+        # Clean up the temp on failure
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        # Re‑raise so programming errors elsewhere aren’t hidden
+        raise
 
 def fix_mojibake(path: str, make_backup: bool = True,
                  dry_run: bool = False) -> None:
@@ -2317,32 +2580,61 @@ def fix_mojibake(path: str, make_backup: bool = True,
     Fix mojibake in a text file, recoding from CP1252 to UTF-8 if necessary.
     If the file is already valid UTF-8, it will only fix mojibake.
     """
+    import datetime as dt
     fallback_logging_config()
     if not os.path.isfile(path):
         logging.error(f"{path} is not a file")
         return
 
-    # If not valid UTF-8, attempt CP1252→UTF-8 recode
-    if not is_valid_utf8(path):
-        if recode_cp1252_to_utf8(path, make_backup=make_backup):
-            logging.info(f'↻ Recoded CP1252→UTF-8: {path}')
-            # Then run ftfy on it in case there’s leftover mojibake
-            if fix_file(path, make_backup=False, dry_run=dry_run):
-                logging.info(f'    ✔ Plus ftfy-cleaned: {path}')
-        else:
-            logging.warning(f'⚠ Skipped (not UTF-8 or CP1252): {path}')
+    try:
+        with open(path, 'rb') as f:
+            raw_bytes = f.read()
+    except Exception as e:
+        logging.error(f"Failed to read {path}: {e}")
         return
 
-    # If valid UTF-8, fix mojibake only
-    try:
-        if fix_file(path, make_backup=make_backup, dry_run=dry_run):
-            logging.info(f'✔ Fixed mojibake: {path}')
-    except UnicodeDecodeError:
-        logging.warning(f'Skipped (decode error): {path}')
+    original_text =      decode_utf8(raw_bytes, path) \
+                    or decode_cp1252(raw_bytes, path)
+    if original_text is None:
+        return
+
+    # Start with the original text but keep it in memory unmodified.
+    current_text = original_text
+
+    # Either way, check for mojibake and fix it if necessary
+    maybe_fixed = fix_text(current_text, path, raw_bytes)
+    if maybe_fixed is not None:
+        current_text = maybe_fixed
+        logging.info(f"✔ Fixed mojibake: {path}")
+
+    # If the text is from an HTML file, ensure it has a UTF-8 meta tag
+    if path.lower().endswith(('.html','.htm')):
+        current_text = ensure_utf8_meta(current_text)
+
+    # If we have fixed the text, write it back
+    if current_text != original_text:
+        if dry_run:
+            logging.info(f"Dry run: would write changes to {path}")
+        else:
+            if make_backup:
+                current_datetime = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                backup_path = f"{path}_{current_datetime}.bak"
+                try:
+                    os.rename(path, backup_path)
+                    logging.info(f"Backup created: {backup_path}")
+                except OSError as e:
+                    logging.error(f"Failed to create backup for {path}: {e}")
+                    return
+            try:
+                atomic_write(path, current_text, encoding='utf-8')
+                logging.info(f"✔ Successfully fixed mojibake in {path}")
+            except Exception as e:
+                logging.error(f"Failed to write changes to {path}: {e}")
 
 
-def treeview_new_files(directory: str, last_file_path: str, last_mtime: float, prefix: str = '',
-                       is_last: bool = True, level: int = 0, state: dict = None) -> bool:
+def treeview_new_files(directory: str, last_file_path: str, last_mtime: float,
+                       prefix: str = '', is_last: bool = True, level: int = 0,
+                       state: dict = None) -> bool:
     """Recursively scan the directory, print the contents of files newer than last_file_path (and store its modification date in last_mtime). Return True if any relevant files are found."""
     fallback_logging_config(rawlog=True)
     if state is None:
@@ -2556,7 +2848,7 @@ def open_dir_in_VLC(the_dir: str, sort_choice: str = "sort_by_name",
     base_dir = os.path.basename(os.path.normpath(the_dir))
     # Write the playlist to disk in the parent directory
     playlist_path = os.path.join(the_dir, f"{filename_format(base_dir)}_playlist.m3u")
-    with open(playlist_path, "w") as playlist_file:
+    with open(playlist_path, 'w') as playlist_file:
         playlist_file.write(playlist_content)
     # Open the playlist in VLC
     if start_flag: command_list = ["vlc", start_flag, playlist_path]
