@@ -3,9 +3,10 @@
 # Written by Emmy Killett (she/her), ChatGPT 4o (it/its), ChatGPT o1-preview (it/its), ChatGPT o3-mini-high (it/its), ChatGPT o4-mini-high (it/its), and GitHub Copilot (it/its).
 from __future__ import annotations  # For Python 3.7+ compatibility with type annotations
 import os
+from pathlib import Path  # Preferred over os.path for path manipulations.
 import sys
 import logging
-from typing import TextIO, Any, TypeAlias, Type
+from typing import TextIO, Any, TypeAlias, Type, Literal
 import re  # Used to precompile regexes for performance
 
 print("REPLACE ALL WRITE AND APPEND STATEMENTS WITH ud.atomic_write() AND ud.atomic_append() RESPECTIVELY! OH, AND WRITE ud.atomic_append() SO IT CAN BE USED!!!")
@@ -166,31 +167,26 @@ class LLMs:
                     model: str, company: str, temperature: float,
                     max_tokens: int = 1000) -> str:
         """Call the chosen LLM's API and return the text response."""
-        try:
-            # ADD NEW COMPANY LLMs HERE.
-            if company == "OpenAI":
-                response_obj = self.clients[company].chat.completions.create(
-                    model=model,
-                    temperature=temperature,
-                    messages=[
-                        {"role": "system", "content": system_message},
-                        {"role": "user",   "content": prompt},
-                    ]
-                )
-                return response_obj.choices[0].message.content
-            elif company == "Anthropic":
-                response_obj = self.clients[company].messages.create(
-                    model=model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    system=system_message,
-                    messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-                )
-                return response_obj.content[0].text
-            else:
-                my_critical_error(f"Unknown company: {company}")
-        except Exception as e:
-            my_critical_error(f"An error occurred: {e}", choose_breakpoint=True)
+        # ADD NEW COMPANY LLMs HERE.
+        if company == "OpenAI":
+            response_obj = self.clients[company].chat.completions.create(
+                model=model,
+                temperature=temperature,
+                messages=[{"role": "system", "content": system_message},
+                            {"role": "user",   "content": prompt}]
+            )
+            return response_obj.choices[0].message.content
+        elif company == "Anthropic":
+            response_obj = self.clients[company].messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system_message,
+                messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+            )
+            return response_obj.content[0].text
+        else:
+            my_critical_error(f"Unknown company: {company}")
 
 
 class MemoryHandler(logging.Handler):
@@ -423,8 +419,11 @@ def my_popen(command_list: list, suppress_info: bool = False,
 
         return MyPopenResult(stdout=stdout, stderr=stderr, returncode=process.returncode)
 
-    except Exception as e:
-        logging.error(f"An error occurred: {e}")
+    except Exception as e:  # I don't want any exception here to crash the script, so I catch it and return a MyPopenResult with an error message.
+        if not suppress_error:
+            logging.error(f"An error occurred while executing the command '{command_list_str}'", exc_info=True)
+        else:
+            logging.info( f"An error occurred while executing the command '{command_list_str}'", exc_info=True)
         return MyPopenResult(stdout="", stderr=str(e), returncode=-1)
 
 
@@ -475,14 +474,14 @@ def my_fopen(file_path: str, suppress_errors: bool = False,
             return file_content  # Exit the function if reading is successful
         except UnicodeDecodeError:
             this_message = f"Unicode decode error with encoding {encoding} reading file {file_path}"
-            if not suppress_errors: logging.warning(this_message)
-            else:                   logging.info(this_message)
+            if not suppress_errors: logging.warning(this_message, exc_info=True)
+            else:                   logging.info(   this_message, exc_info=True)
             continue
-        except Exception as e:
-            this_message = f"Error reading file {file_path} with encoding {encoding}: {str(e)}"
+        except Exception: # Catch any other exceptions that might occur, but don't crash.
+            this_message = f"Error reading file {file_path} with encoding {encoding}."
             if not rawlog:
-                if not suppress_errors: logging.error(this_message)
-                else:                   logging.info(this_message)
+                if not suppress_errors: logging.error(this_message, exc_info=True)
+                else:                   logging.info( this_message, exc_info=True)
             return False
     return False
 
@@ -525,7 +524,7 @@ def load_ast_var(var_name: str, script_path: str, rawlog: bool = False) -> Any:
                     try:
                         return ast.literal_eval(node.value)
                     except ValueError as e:
-                        raise ValueError(f"Cannot literal_eval the value of {var_name}") from e
+                        raise ValueError(f"Cannot literal_eval the value of {var_name}: {e}") from e
         # also handle annotated assignments: var_name: Type = <expr>
         elif isinstance(node, ast.AnnAssign):
             target = node.target
@@ -533,7 +532,7 @@ def load_ast_var(var_name: str, script_path: str, rawlog: bool = False) -> Any:
                 try:
                     return ast.literal_eval(node.value)
                 except ValueError as e:
-                    raise ValueError(f"Cannot literal_eval the value of {var_name}") from e
+                    raise ValueError(f"Cannot literal_eval the value of {var_name}: {e}") from e
 
     raise AttributeError(f"Top-level variable {var_name!r} not found in {script_path}")
 
@@ -553,7 +552,7 @@ def normalize_to_dict(value: Any, var_name: str, script_path: str) -> dict:
                 return parsed
             logging.warning(f"Variable {var_name!r} in {script_path} JSON-decoded to {type(parsed).__name__}, expected dict.")
         except json.JSONDecodeError as e:
-            logging.warning(f"Failed to JSON-decode variable {var_name!r} from {script_path}: {e}. Expected a dict or JSON string.")
+            logging.warning(f"Failed to JSON-decode variable {var_name!r} from {script_path}. Expected a dict or JSON string.", exc_info=e)
     else:
         logging.warning(f"Variable {var_name!r} in {script_path} is of type {type(value).__name__}, expected dict or JSON string.")
     return {}
@@ -606,9 +605,8 @@ def get_computer_name() -> str:
         try:
             name = method_func()
             results[method_name] = name
-        except Exception as e:
-            # Optionally, you can log the exception or print it for debugging
-            # print(f"Method {method_name} failed with error: {e}")
+        except Exception:  # Ignore all exceptions for individual methods
+            # logging.exception(f"Method {method_name} failed.")
             pass  # Skip methods that fail
 
     computer_name = analyze_results(results)
@@ -670,7 +668,7 @@ def kill_process(pname: str) -> None:
             process_list = subprocess.check_output(["pgrep", "-f", pname]).decode(DEFAULT_ENCODING)
             process_ids = process_list.splitlines()
         except subprocess.CalledProcessError as e:
-            raise ValueError(f"Failed to find process with name {pname}. Make sure the process name is correct and unique.") from e
+            raise ValueError(f"Failed to find process with name {pname}. Make sure the process name is correct and unique: {e}") from e
 
         if process_ids:
             for pid in process_ids:
@@ -679,7 +677,7 @@ def kill_process(pname: str) -> None:
                     os.kill(int(pid), signal.SIGTERM)  # Send SIGTERM to terminate the process
                     print(f"Sent SIGTERM to PID {pid}")
                 except ProcessLookupError as e:
-                    raise ValueError(f"Process with PID {pid} not found. It may have already exited.") from e
+                    raise ValueError(f"Process with PID {pid} not found. It may have already exited: {e}") from e
         else:
             print(f"No {pname} process found.")
             break
@@ -710,7 +708,7 @@ def ensure_even_dimensions(image_path: str) -> None:
                 img.save(image_path)
                 logging.info(f"Resized image to even dimensions: width = {new_width}, height = {new_height}")
             except OSError as e:
-                raise ValueError(f"Could not resize image {image_path} to even dimensions.") from e
+                raise ValueError(f"Could not resize image {image_path} to even dimensions: {e}") from e
         else:
             logging.info(f"Image already has even dimensions: width = {width}, height = {height}")
 
@@ -1006,7 +1004,7 @@ def parse_timezone(tz_arg: str | dt.tzinfo | None = None) -> dt.tzinfo | str:
         try:
             return ZoneInfo(tz_arg)
         except ZoneInfoNotFoundError as e:
-            raise ValueError(f"Unknown timezone {tz_arg!r}") from e
+            raise ValueError(f"Unknown timezone {tz_arg!r}: {e}") from e
 
     raise TypeError(f"Expected None, str, or tzinfo; got {type(tz_arg).__name__!r}")
 
@@ -1022,7 +1020,7 @@ def decimal_year_to_datetime(dec: float, use_astropy: bool = False) -> dt.dateti
         try:
             from astropy.time import Time
         except ImportError as e:
-            raise ValueError("'use_astropy=True' requires the astropy package") from e
+            raise ValueError(f"'use_astropy=True' requires the astropy package: {e}") from e
         t = Time(dec, format='jyear', scale='utc')
         return t.to_datetime().replace(tzinfo=dt.timezone.utc)
 
@@ -1034,7 +1032,7 @@ def decimal_year_to_datetime(dec: float, use_astropy: bool = False) -> dt.dateti
         year_secs = (end_dt - start_dt).total_seconds()
         return start_dt + dt.timedelta(seconds=rem * year_secs)
     except ValueError as e:
-        raise ValueError(f"Failed to convert decimal year {dec} to datetime") from e
+        raise ValueError(f"Failed to convert decimal year {dec} to datetime: {e}") from e
 
 
 def _parse_iso(given_date: str) -> dt.datetime:
@@ -1044,7 +1042,7 @@ def _parse_iso(given_date: str) -> dt.datetime:
     try:
         return isoparse(given_date)
     except ParserError as e:
-        raise ValueError(f"Invalid ISO8601 date '{given_date}'") from e
+        raise ValueError(f"Invalid ISO8601 date '{given_date}': {e}") from e
 
 
 def is_float(s: str) -> bool:
@@ -1241,7 +1239,7 @@ def parse_datetime(given_date: AnyDateTimeType, timezone: str | dt.tzinfo | None
                 units = format_parts[0].strip()
                 multiplier = seconds_in_unit(units)  # This will raise ValueError if the unit is unknown
             except ValueError as e:
-                raise ValueError(f"Invalid time unit '{units}' in format string '{format_str}'.") from e
+                raise ValueError(f"Invalid time unit '{units}' in format string '{format_str}': {e}") from e
             # If the format_parts list has only one part, it means the epoch defaults to the Unix epoch (1970-01-01T00:00:00Z).
             if len(format_parts) == 1:
                 # If the format_parts list has only one part, it means the format is just "units" (e.g. "days", "weeks", etc.)
@@ -1253,7 +1251,7 @@ def parse_datetime(given_date: AnyDateTimeType, timezone: str | dt.tzinfo | None
             try:
                 epoch = parse_datetime(epoch_str, timezone=parsed_tz)
             except ValueError as e:
-                raise ValueError(f"Invalid epoch '{epoch}' in format string '{format_str}'.") from e
+                raise ValueError(f"Invalid epoch '{epoch}' in format string '{format_str}': {e}") from e
             # Now we can calculate the datetime based on the given_date (and the multiplier from 'units') and the epoch
             parsed_dt = epoch + dt.timedelta(seconds=float(given_date) * multiplier)
 
@@ -1288,7 +1286,7 @@ def parse_datetime(given_date: AnyDateTimeType, timezone: str | dt.tzinfo | None
         try:
             parsed_dt = dt.datetime.strptime(given_date, format_str)
         except ValueError as e:
-            raise ValueError(f"Invalid date format '{given_date}' with specified format '{format_str}'.") from e
+            raise ValueError(f"Invalid date format '{given_date}' with specified format '{format_str}': {e}") from e
 
     # Try parsing the date string in various formats
     # Start with RFC 2822 format, then ISO8601, then free-form strings
@@ -1500,12 +1498,12 @@ def if_filepath_then_read(input_string_or_filepath: str,
                 logging.error(f"Could not read file: {file_path}")
                 return ""
             return contents
-        except FileNotFoundError:
-            logging.error(f"File not found: {file_path}")
-        except PermissionError:
-            logging.error(f"Permission denied: {file_path}")
+        except FileNotFoundError as e:
+            logging.exception(f"File not found: {file_path}")
+        except PermissionError as e:
+            logging.exception(f"Permission denied: {file_path}")
         except UnicodeDecodeError as e:
-            logging.error(f"Could not decode {file_path!r}: {e}")
+            logging.exception(f"Could not decode {file_path!r}.")
     else:  # Otherwise, treat "input_string" as a string.
         if not isinstance(input_string_or_filepath, str):
             raise TypeError(f"Expected 'input_string_or_filepath' to be a string or file path, got {type(input_string_or_filepath).__name__!r}")
@@ -1534,10 +1532,8 @@ def compile_code(source_or_filepath: str,
         # If it's a string, we need to provide a dummy file path for the compiler.
         # This is just to satisfy the compiler, it won't be used.
         file_path = "<string>"
-
     try:
         compile(source, file_path, "exec")
-        return True
     except SyntaxError as e:
         # protect against None offsets
         lineno = e.lineno or '?'
@@ -1547,10 +1543,9 @@ def compile_code(source_or_filepath: str,
         logging.error(f"Syntax error in {e.filename!r}, line {lineno}, column {offset}:\n"
                       f"    {line}\n"
                       f"    {pointer}\n"
-                      f"    {e.msg!r}")
-    except Exception as e:
-        logging.error(f"Unexpected error checking syntax of {file_path!r}: {e}")
-    return False
+                      f"    {e.msg!r}", exc_info=True)
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------------
@@ -1800,8 +1795,8 @@ def check_python_formatting(path: str, diff_choice: int = 1) -> bool:
             return False
     try:
         tree = my_ast_parse(src, path)
-    except SyntaxError as e:
-        logging.error(f"❌ {e}")
+    except SyntaxError:
+        logging.exception(f"❌ {path} contains a syntax error.")
         return False
 
     checker = FormatChecker(src)
@@ -1828,9 +1823,54 @@ def run_flake8(path: str, ignore_codes: list[str] = [], max_line_length: int = 1
     :param max_line_length:  The line‑length threshold for E501 (default 100).
     :return:           A Flake8 Report object with all violations.
     """
+    import io
+    from collections import defaultdict
     from flake8.api import legacy as flake8
     style_guide = flake8.get_style_guide(max_line_length=max_line_length, ignore=ignore_codes)
-    return style_guide.check_files([path])
+    report = style_guide.check_files([path])
+    if report.total_errors == 0:
+        logging.info(f"✅ No Flake8 violations found in {path}.")
+        return report
+    logging.error(f"Found {report.total_errors} total violations in {path}:")
+    for stat in report.get_statistics(""):
+        logging.error(f"  {stat}")
+
+    # This section was SUPPOSED to print a grouped summary of violations by code with line numbers.
+    # However, it CORRUPTS THE FILE IT IS EXAMINING! https://chatgpt.com/share/688ba75b-7860-8006-bc9f-1bce8cb01359
+    # BEWARE: DO NOT USE THIS CODE!
+    # # Create a StringIO and tell flake8 to write its output there
+    # buf = io.StringIO()
+    # style = flake8.get_style_guide(max_line_length=max_line_length, ignore=ignore_codes, output_file=buf)
+
+    # # Run the checks
+    # report = style.check_files([path])  # path is your filename or list of files
+    # # now force every violation to be written into our StringIO
+    # formatter = style._application.formatter
+    # for violation in style._application.file_checker_manager.results:
+    #     formatter.handle(violation)
+    # formatter.stop()
+
+    # # Rewind and parse each line of the report
+    # buf.seek(0)
+    # logging.info("\n" + buf.getvalue())
+    # buf.seek(0)
+    # by_code = defaultdict(list)
+    # for line in buf:
+    #     # Each line looks like: "univ_defs.py:1501:9: F841 local variable 'e' is assigned to but never used"
+    #     parts = line.strip().split(":", 3)
+    #     if len(parts) < 4:
+    #         continue
+    #     _, lineno_str, _, rest = parts
+    #     code = rest.strip().split()[0]      # e.g. "F841"
+    #     by_code[code].append(int(lineno_str))
+
+    # # Print a grouped summary
+    # breakpoint()
+    # for code, lines in sorted(by_code.items()):
+    #     lines = sorted(set(lines))
+    #     print(f"{code}: line{'s' if len(lines)>1 else ''} {', '.join(map(str, lines))}")
+
+    return report
 
 
 def _gather_flake8_issues( path: str, ignore_codes: list[str] = [], max_line_length: int = 100) -> dict[str, str]:
@@ -1917,8 +1957,8 @@ def get_autopep8_fixable_codes() -> set[str]:
     fallback_logging_config()
     try:
         proc = subprocess.run(["autopep8", "--list-fixes"], capture_output=True, text=True, check=True)
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        logging.warning(f"autopep8 not found or failed: {e!r}")
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        logging.warning(f"autopep8 not found or failed.", exc_info=True)
         # autopep8 not on PATH or error—assume nothing fixable
         return set()
 
@@ -2266,13 +2306,9 @@ def interactive_flake8(path: str, diff_choice: int = 1, ignore_codes: list[str] 
     """
     fallback_logging_config()
     logging.debug(f"At the top of the function {sys._getframe(1).f_code.co_name}(), {diff_choice=}")
-    report = run_flake8(path, ignore_codes=ignore_codes, max_line_length=max_line_length)
-    if report.total_errors == 0:
+    if not run_flake8(path, ignore_codes=ignore_codes, max_line_length=max_line_length):
         logging.info("No flake8 errors—nothing to do.")
         return
-    logging.error(f"\nFound {report.total_errors} total violations in {path}:")
-    for stat in report.get_statistics(""):
-        logging.error(f"  {stat}")
     codes = _gather_flake8_issues(path, ignore_codes=ignore_codes, max_line_length=max_line_length)
     fixable_codes = get_autopep8_fixable_codes()
     logging.debug(f"Autopep8 can fix these codes: {fixable_codes}")
@@ -2284,7 +2320,8 @@ def interactive_flake8(path: str, diff_choice: int = 1, ignore_codes: list[str] 
         if not ask_and_autopep8(path, code, desc, diff_choice=diff_choice,
                                 changed_color=changed_color, deleted_color=deleted_color, added_color=added_color):
             break
-    logging.info(f"{ANSI_GREEN}Done. You may want to re-run flake8 to confirm everything is fixed.{ANSI_RESET}")
+    logging.info(f"{ANSI_GREEN}Done. Re-running flake8 to confirm fixes...{ANSI_RESET}")
+    run_flake8(path, ignore_codes=ignore_codes, max_line_length=max_line_length)
 
 
 MYDIFF_SCRIPT = '''import argparse
@@ -2296,8 +2333,8 @@ def main() -> None:
     """Main entry point for the script."""
     ud.configure_logging("mydiff", log_level="INFO", rawlog=True)
     parser = argparse.ArgumentParser(description="Diff two files using ud.my_diff().")
-    parser.add_argument("orig_path", type=str, help="Path to original file.")
-    parser.add_argument("changed_path", type=str, help="Path to changed file.")
+    parser.add_argument("orig_path",     type=str, help="Path to original file.")
+    parser.add_argument("changed_path",  type=str, help="Path to changed file.")
     parser.add_argument("--diff_choice", type=int, default=1,
                         help="0 = old-style diff, 1 = unified diff with 0 context lines, "
                              "2+ = unified diff with 'diff_choice - 1' context lines")
@@ -2305,7 +2342,7 @@ def main() -> None:
                         help="Color for unchanged characters in changed lines (default: ANSI_CYAN)")
     parser.add_argument("--deleted_color", type=str, default=ud.ANSI_RED,
                         help="Color for deleted characters in original lines (default: ANSI_RED)")
-    parser.add_argument("--added_color", type=str, default=ud.ANSI_GREEN,
+    parser.add_argument("--added_color",   type=str, default=ud.ANSI_GREEN,
                         help="Color for added characters in changed lines (default: ANSI_GREEN)")
     args = parser.parse_args()
 
@@ -2332,7 +2369,7 @@ def main() -> None:
     """Main entry point for the script."""
     ud.configure_logging("format_checker", log_level="INFO")
     parser = argparse.ArgumentParser(description="Check Python formatting in a file.")
-    parser.add_argument("path", type=str, help="Path to the Python file to check")
+    parser.add_argument("filepath", type=str, help="Path to the Python file to check")
     parser.add_argument("--diff_choice", type=int, default=1,
                         help="0 = old-style diff, 1 = unified diff with 0 context lines, "
                              "2+ = unified diff with 'diff_choice - 1' context lines")
@@ -2344,10 +2381,10 @@ def main() -> None:
                         help="Color for added characters in changed lines (default: ANSI_GREEN)")
     args = parser.parse_args()
 
-    if not ud.check_python_formatting(args.path, diff_choice=args.diff_choice):
+    if not ud.check_python_formatting(args.filepath, diff_choice=args.diff_choice):
         return
 
-    ud.interactive_flake8(args.path, diff_choice=args.diff_choice, ignore_codes=ud.IGNORED_CODES, max_line_length=1000,
+    ud.interactive_flake8(args.filepath, diff_choice=args.diff_choice, ignore_codes=ud.IGNORED_CODES, max_line_length=1000,
                           changed_color=args.changed_color, deleted_color=args.deleted_color, added_color=args.added_color)
 
 if __name__ == "__main__":
@@ -2414,8 +2451,8 @@ def decode_cp1252(raw_bytes: bytes, path: str = "input string") -> str | None:
         text = raw_bytes.decode('cp1252', errors='strict')
         logging.debug(f"{path} decoded as valid CP1252.")
         return text
-    except UnicodeDecodeError as e:
-        logging.debug(f"{path} failed to decode as CP1252: {e!r}")
+    except UnicodeDecodeError:
+        logging.debug(f"{path} failed to decode as CP1252.", exc_info=True)
         return None
 
 
@@ -2425,8 +2462,8 @@ def contains_mojibake(text: str) -> bool:
     fallback_logging_config()
     try:
         mojibake_present = ftfy.badness.is_bad(text)
-    except Exception as e:
-        logging.debug(f"Failed to check for mojibake: {e}")
+    except Exception: # Catch any unexpected errors from ftfy without crashing
+        logging.debug(f"Failed to check for mojibake.", exc_info=True)
         mojibake_present = False
     logging.debug(f"Mojibake present: {mojibake_present}")
     # I HAVEN'T TRIED THIS NEXT LINE, BUT IT MIGHT CAUSE FEWER FALSE POSITIVES:
@@ -2445,8 +2482,8 @@ def fix_text(current_text: str, path: str, raw_bytes: bytes) -> str | None:
         return None
     try:
         fixed = ftfy.fix_encoding(current_text)
-    except Exception as e:
-        logging.error(f"Failed to fix mojibake in {path}: {e}")
+    except Exception:  # Catch any unexpected errors from ftfy without crashing
+        logging.error(f"Failed to fix mojibake in {path}.", exc_info=True)
         return None
     # If logging level is set to DEBUG, show my diff of original vs fixed:
     if logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -2454,26 +2491,8 @@ def fix_text(current_text: str, path: str, raw_bytes: bytes) -> str | None:
             # Mangle the original string to simulate browser encoding issues:
             mangled_original = raw_bytes.decode('cp1252', errors='replace')
             my_diff(mangled_original, fixed, path)
-        except Exception as e:
-            logging.debug(f"Could not simulate browser mangling: {e}")
-    return fixed
-
-
-def ensure_utf8_meta(fixed: str) -> str:
-    """
-    Ensure the HTML text has a <meta charset="utf-8"> tag.
-    If it does not, insert it right after the <head> tag.
-    Either way, return the modified (or unmodified) HTML string.
-    """
-    if re.search(r'<meta[^>]+charset=', fixed, flags=re.IGNORECASE):
-        # Replace any existing charset
-        fixed = re.sub(r'(<meta[^>]+charset=)[^"\'>]+',
-                      r'\1utf-8', fixed, flags=re.IGNORECASE)
-    else:
-        # Insert a new <meta charset> right after <head>
-        fixed = re.sub(r'(<head[^>]*>)',
-                      r'\1\n    <meta charset="utf-8">',
-                      fixed, count=1, flags=re.IGNORECASE)
+        except Exception:  # Catch any unexpected errors from decoding but don't crash.
+            logging.debug(f"Could not simulate browser mangling in {path}.", exc_info=True)
     return fixed
 
 
@@ -2516,65 +2535,140 @@ def ensure_utf8_meta(html: str) -> str:
                   html, count=1, flags=re.IGNORECASE)
 
 
-def atomic_write(path: str, data: str, encoding: str = DEFAULT_ENCODING) -> None:
+def atomic_write(filepath: str | Path | os.PathLike, data: str, 
+                 write_mode: Literal['w', 'a'], encoding: str = DEFAULT_ENCODING) -> None:
     """
-    Atomically write `data` to `path` using a temp file + os.replace().
-    Will fsync the file before replacing to ensure it’s on disk.
-    If `path` exists, it will preserve its original permissions.
-    If `path` does not exist, it will be created with default permissions.
-    If an error occurs, the temp file will be removed.
-    This function is useful for ensuring that the file is written atomically,
-    meaning that if the write fails, the original file remains unchanged.
+    Atomically write `data` to `filepath` via a temp file + os.replace().
 
     Parameters:
-    - `path`: The file path to write to.
-    - `data`: The data to write to the file.
-    - `encoding`: The encoding to use when writing the file.
+    - filepath   : The file path to write to. Can be a string, Path, or any PathLike object.
+    - data       : The data to write to the file. Must be a string.
+    - write_mode : 'w' to overwrite atomically, or
+                   'a' to append atomically.
+    - encoding   : The encoding to use when writing the file.
 
     Returns:
-    None. If the write is successful, the file at `path` will be replaced with `data`.
-    If an error occurs, the temp file will be removed and an exception will be raised.
+    - None : The file is written atomically, meaning it will not be partially written if an error occurs.
 
     Raises:
-    - `OSError`: If there is an error during the file operations.
+    - ValueError: If `write_mode` is not 'w' or 'a'.
+    - OSError: If there is an error during the file operations.
     """
     import tempfile
-    # If a file at `path` exists, preserve its original permissions.
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+        else:
+            import fcntl
+    except (ImportError, NameError) as e:
+        raise RuntimeError(f"Failed to import necessary locking modules: {e}") from e
+    filepath = Path(filepath)   # Accepts str, Path, or any PathLike object via os.fspath.
+    write_mode = write_mode.lower()
+    if write_mode not in ('w', 'a'):
+        raise ValueError("write_mode must be 'w' (overwrite) or 'a' (append)")
+
+    # If a file at `filepath` exists, preserve its original permissions.
     try:
         # In Unix-style permissions, the lower 9 bits of the mode
         # represent the permissions for user, group, and others.
         # We use os.stat() to get the file's mode and mask it with 0o777
         # to extract just the permission bits.
-        orig_mode = os.stat(path).st_mode & 0o777
+        orig_mode = os.stat(filepath).st_mode & 0o777
+        already_exists = True
     except FileNotFoundError:
         orig_mode = None
-
-    dir_name, base_name = os.path.dirname(path), os.path.basename(path)
-    dir_name = dir_name or "."  # when path has no directory component
-    os.makedirs(dir_name, exist_ok=True)  # ensure the directory exists
-    # Create a temp file in the same directory
-    fd, tmp_path = tempfile.mkstemp(prefix=base_name, dir=dir_name)
-    # Open it via the fd so we can fsync()
-    with os.fdopen(fd, 'w', encoding=encoding) as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    # Restore the original permissions if we had them
-    if orig_mode is not None:
-        os.chmod(tmp_path, orig_mode)
+        already_exists = False
+        if write_mode == 'a':
+            logging.warning(f"Appending to {filepath!r} but it does not exist. Creating new file.")
+            write_mode = 'w'  # If appending to a non-existent file, switch to write mode.
+    except OSError as e:
+        raise RuntimeError(f"Failed to stat {filepath!r}: {e}") from e
+    base_name = filepath.name
+    dir_name  = filepath.parent
     try:
-        # Atomically replace the target
-        os.replace(tmp_path, path)
-    except OSError:
-        # Clean up the temp on failure
+        dir_name.mkdir(parents=True, exist_ok=True)  # ensure the directory exists
+    except OSError as e:
+        raise RuntimeError(f"Failed to create directory {dir_name!r}: {e}") from e
+    # ─── grab a per-path advisory lock so no two writers stomp each other ───
+    lock_path = dir_name / (base_name + ".lock")
+    with open(lock_path, 'a+') as lock_file:
         try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-        # Re‑raise so programming errors elsewhere aren’t hidden
-        raise
+            logging.debug(f"Trying to lock {lock_path!r} for atomic write.")
+            locked = False
+            try:  # Block until we get an exclusive lock
+                if sys.platform == "win32":
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
+                locked = True
+            except OSError as e:
+                raise RuntimeError(f"Failed to lock {lock_path!r} for atomic write: {e}") from e
+            logging.debug(f"Successfully locked {lock_path!r} for atomic write.")
+            # Create a temp file in the same directory
+            fd, tmp_path = tempfile.mkstemp(prefix='.' + base_name, suffix=".tmp",
+                                            dir=dir_name)
+            try:
+                # Open it via the fd so we can fsync().
+                # Use 'wb' to write bytes to ensure cross-platform compatibility.
+                # (If we opened the temp file in text mode using 'w', Python would
+                #  buffer and translate newline sequences. This might not be what
+                # we want, especially on Windows.)
+                with os.fdopen(fd, 'wb') as f:
+                    try:
+                        if write_mode == 'a' and already_exists:
+                            # Stream it in chunks so you don't run out of memory
+                            # when appending to a large file.
+                            with open(filepath, 'rb') as old:
+                                while True:
+                                    chunk = old.read(8192)
+                                    if not chunk:
+                                        break
+                                    f.write(chunk)
+                        # ─── now write your new data (same for 'w' or 'a') ───
+                        f.write(data.encode(encoding))
+                        f.flush()
+                        os.fsync(f.fileno())
+                    except OSError as e:
+                        raise RuntimeError(f"Failed to write data to temp file {tmp_path!r}: {e}") from e
+                    # Restore the original permissions if we had them
+                    if orig_mode is not None:
+                        try:
+                            os.chmod(tmp_path, orig_mode)
+                        except OSError as e:
+                            raise RuntimeError(f"Failed to restore permissions for {tmp_path!r}: {e}") from e
+                    try:
+                        os.replace(tmp_path, filepath)
+                        tmp_path = None  # Ownership transferred: don’t clean up below
+                    except OSError as e:
+                        raise RuntimeError(f"Failed to replace {filepath!r} with {tmp_path!r}: {e}") from e
+            finally: # Only clean up if ownership was not transferred.
+                if tmp_path is not None and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            # On Windows, we can’t fsync() the directory, so we just assume the rename is atomic.
+            if sys.platform in ('linux', 'darwin'):
+                # On POSIX, renames aren’t guaranteed to land on disk until the directory is synced.
+                dir_fd = None
+                try:
+                    dir_fd = os.open(dir_name, os.O_DIRECTORY)
+                    os.fsync(dir_fd)
+                except OSError as e:
+                    raise RuntimeError(f"Directory fsync failed for {dir_name!r}: {e}") from e
+                finally:
+                    if dir_fd is not None:
+                        os.close(dir_fd)
+        finally:  # Release the lock
+            if locked:
+                logging.debug(f"Unlocking {lock_path!r} after atomic write.")
+                if sys.platform == "win32":
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+            lock_file.close()
+            logging.debug(f"Released lock on {lock_path!r} after successful atomic write.")
 
-def fix_mojibake(path: str, make_backup: bool = True,
+
+def fix_mojibake(filepath: str, make_backup: bool = True,
                  dry_run: bool = False) -> None:
     """
     Fix mojibake in a text file, recoding from CP1252 to UTF-8 if necessary.
@@ -2582,19 +2676,19 @@ def fix_mojibake(path: str, make_backup: bool = True,
     """
     import datetime as dt
     fallback_logging_config()
-    if not os.path.isfile(path):
-        logging.error(f"{path} is not a file")
+    if not os.path.isfile(filepath):
+        logging.error(f"{filepath} is not a file")
         return
 
     try:
-        with open(path, 'rb') as f:
+        with open(filepath, 'rb') as f:
             raw_bytes = f.read()
-    except Exception as e:
-        logging.error(f"Failed to read {path}: {e}")
+    except Exception:  # Catch any unexpected errors from reading the file without crashing.
+        logging.error(f"Failed to read {filepath}.", exc_info=True)
         return
 
-    original_text =      decode_utf8(raw_bytes, path) \
-                    or decode_cp1252(raw_bytes, path)
+    original_text =      decode_utf8(raw_bytes, filepath) \
+                    or decode_cp1252(raw_bytes, filepath)
     if original_text is None:
         return
 
@@ -2602,34 +2696,31 @@ def fix_mojibake(path: str, make_backup: bool = True,
     current_text = original_text
 
     # Either way, check for mojibake and fix it if necessary
-    maybe_fixed = fix_text(current_text, path, raw_bytes)
+    maybe_fixed = fix_text(current_text, filepath, raw_bytes)
     if maybe_fixed is not None:
         current_text = maybe_fixed
-        logging.info(f"✔ Fixed mojibake: {path}")
+        logging.info(f"✔ Fixed mojibake: {filepath}")
 
     # If the text is from an HTML file, ensure it has a UTF-8 meta tag
-    if path.lower().endswith(('.html','.htm')):
+    if filepath.lower().endswith(('.html','.htm')):
         current_text = ensure_utf8_meta(current_text)
 
     # If we have fixed the text, write it back
     if current_text != original_text:
         if dry_run:
-            logging.info(f"Dry run: would write changes to {path}")
+            logging.info(f"Dry run: would write changes to {filepath}")
         else:
             if make_backup:
                 current_datetime = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-                backup_path = f"{path}_{current_datetime}.bak"
+                backup_path = f"{filepath}_{current_datetime}.bak"
                 try:
-                    os.rename(path, backup_path)
+                    os.rename(filepath, backup_path)
                     logging.info(f"Backup created: {backup_path}")
-                except OSError as e:
-                    logging.error(f"Failed to create backup for {path}: {e}")
+                except OSError:
+                    logging.exception(f"Failed to create backup for {filepath}.")
                     return
-            try:
-                atomic_write(path, current_text, encoding='utf-8')
-                logging.info(f"✔ Successfully fixed mojibake in {path}")
-            except Exception as e:
-                logging.error(f"Failed to write changes to {path}: {e}")
+            atomic_write(filepath, current_text, 'w', encoding='utf-8'):
+            logging.info(f"✔ Successfully fixed mojibake in {filepath}")
 
 
 def treeview_new_files(directory: str, last_file_path: str, last_mtime: float,
@@ -2711,8 +2802,8 @@ def treeview_new_files(directory: str, last_file_path: str, last_mtime: float,
                     # Indent file contents for better readability
                     indented_contents = '\n'.join([f"{child_prefix}    {line}" for line in contents.splitlines()])
                     logging.info(indented_contents)
-            except Exception as e:
-                logging.error(f"{child_prefix}    Error reading '{file_entry.path}': {e}")
+            except Exception:  # Catch any unexpected errors from reading the file without crashing.
+                logging.exception(f"{child_prefix}    Error reading '{file_entry.path}'.", exc_info=True)
             logging.info("")  # Add an empty line for separation
 
         # Print subdirectories
@@ -2871,7 +2962,7 @@ def remove_prefix_from_filename(filepath: str, prefix: str) -> bool:
                 print(f"Renamed '{filepath}' to '{new_filepath}'.")
                 return True
             except OSError as e:
-                raise OSError(f"Failed to rename '{filepath}' to '{new_filepath}'") from e
+                raise OSError(f"Failed to rename '{filepath}' to '{new_filepath}': {e}") from e
         else:
             print(f"Cannot rename '{filepath}' to '{new_filepath}': New path already exists.")
             return False
@@ -2929,16 +3020,16 @@ def combine_html_files(file_paths: list[str],
             # Extract <body> content
             body_content = soup.body
             combined_body += str(body_content)
-        except Exception as e:
-            logging.error(f"File {file_path} encountered error {e}")
+        except Exception:  # Catch any unexpected errors from BeautifulSoup without crashing.
+            logging.exception(f"File {file_path} encountered an error.")
     # Create the new HTML structure
     combined_html = f"<!DOCTYPE html>\n<html>\n{head_content}\n<body>\n{combined_body}\n</body>\n</html>"
     # Save to the output file path
     try:
         with open(output_file_path, 'w', encoding=DEFAULT_ENCODING) as output_file:
             output_file.write(combined_html)
-    except Exception as e:
-        logging.error(f"Error saving combined HTML to {output_file_path}: {e}")
+    except Exception:  # Catch any unexpected errors from writing the file without crashing.
+        logging.exception(f"Error saving combined HTML to {output_file_path}.")
     logging.info(f"Saved combined HTML to '{output_file_path}'.")
 
 
