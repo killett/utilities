@@ -9,7 +9,7 @@ import logging
 from typing import TextIO, Any, TypeAlias, Type, Literal
 import re  # Used to precompile regexes for performance
 
-print("REPLACE ALL WRITE AND APPEND STATEMENTS WITH ud.atomic_write() AND ud.atomic_append() RESPECTIVELY! OH, AND WRITE ud.atomic_append() SO IT CAN BE USED!!!")
+print("REPLACE ALL WRITE AND APPEND STATEMENTS WITH ud.my_atomic_write()!")
 
 # This is the version of univ_defs.py
 __version__ = '0.1.7'
@@ -2535,137 +2535,37 @@ def ensure_utf8_meta(html: str) -> str:
                   html, count=1, flags=re.IGNORECASE)
 
 
-def atomic_write(filepath: str | Path | os.PathLike, data: str, 
-                 write_mode: Literal['w', 'a'], encoding: str = DEFAULT_ENCODING) -> None:
+def my_atomic_write(filepath: str | Path | os.PathLike, data: str | bytes | bytearray,
+                    write_mode: Literal['w', 'a'], encoding: str = DEFAULT_ENCODING,
+                    lock_timeout: float = None,  # seconds to wait for lock (None = forever)
+                   ) -> None:
     """
-    Atomically write `data` to `filepath` via a temp file + os.replace().
-
-    Parameters:
-    - filepath   : The file path to write to. Can be a string, Path, or any PathLike object.
-    - data       : The data to write to the file. Must be a string.
-    - write_mode : 'w' to overwrite atomically, or
-                   'a' to append atomically.
-    - encoding   : The encoding to use when writing the file.
-
-    Returns:
-    - None : The file is written atomically, meaning it will not be partially written if an error occurs.
-
-    Raises:
-    - ValueError: If `write_mode` is not 'w' or 'a'.
-    - OSError: If there is an error during the file operations.
+    Atomically write `data` to `filepath` with an advisory lock.
+    
+    - If write_mode='a' and file exists, data is appended.
+    - If write_mode='a' and file does *not* exist, file is created.
+    - A `.lock` file beside `filepath` prevents concurrent writers.
     """
-    import tempfile
+    from atomicwrites import atomic_write
+    from filelock import FileLock, Timeout
+    path = Path(filepath)
+    # ensure parent directory exists
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # choose text or binary mode
+    is_bytes = isinstance(data, (bytes, bytearray))
+    mode     = write_mode + ('b' if is_bytes else '')
+    text_enc = None if is_bytes else encoding
+    lock_path = str(path) + '.lock'
+    lock = FileLock(lock_path, timeout=lock_timeout)
     try:
-        if sys.platform == "win32":
-            import msvcrt
-        else:
-            import fcntl
-    except (ImportError, NameError) as e:
-        raise RuntimeError(f"Failed to import necessary locking modules: {e}") from e
-    filepath = Path(filepath)   # Accepts str, Path, or any PathLike object via os.fspath.
-    write_mode = write_mode.lower()
-    if write_mode not in ('w', 'a'):
-        raise ValueError("write_mode must be 'w' (overwrite) or 'a' (append)")
-
-    # If a file at `filepath` exists, preserve its original permissions.
-    try:
-        # In Unix-style permissions, the lower 9 bits of the mode
-        # represent the permissions for user, group, and others.
-        # We use os.stat() to get the file's mode and mask it with 0o777
-        # to extract just the permission bits.
-        orig_mode = os.stat(filepath).st_mode & 0o777
-        already_exists = True
-    except FileNotFoundError:
-        orig_mode = None
-        already_exists = False
-        if write_mode == 'a':
-            logging.warning(f"Appending to {filepath!r} but it does not exist. Creating new file.")
-            write_mode = 'w'  # If appending to a non-existent file, switch to write mode.
-    except OSError as e:
-        raise RuntimeError(f"Failed to stat {filepath!r}: {e}") from e
-    base_name = filepath.name
-    dir_name  = filepath.parent
-    try:
-        dir_name.mkdir(parents=True, exist_ok=True)  # ensure the directory exists
-    except OSError as e:
-        raise RuntimeError(f"Failed to create directory {dir_name!r}: {e}") from e
-    # ─── grab a per-path advisory lock so no two writers stomp each other ───
-    lock_path = dir_name / (base_name + ".lock")
-    with open(lock_path, 'a+') as lock_file:
-        try:
-            logging.debug(f"Trying to lock {lock_path!r} for atomic write.")
-            locked = False
-            try:  # Block until we get an exclusive lock
-                if sys.platform == "win32":
-                    lock_file.seek(0)
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-                else:
-                    fcntl.flock(lock_file, fcntl.LOCK_EX)
-                locked = True
-            except OSError as e:
-                raise RuntimeError(f"Failed to lock {lock_path!r} for atomic write: {e}") from e
-            logging.debug(f"Successfully locked {lock_path!r} for atomic write.")
-            # Create a temp file in the same directory
-            fd, tmp_path = tempfile.mkstemp(prefix='.' + base_name, suffix=".tmp",
-                                            dir=dir_name)
-            try:
-                # Open it via the fd so we can fsync().
-                # Use 'wb' to write bytes to ensure cross-platform compatibility.
-                # (If we opened the temp file in text mode using 'w', Python would
-                #  buffer and translate newline sequences. This might not be what
-                # we want, especially on Windows.)
-                with os.fdopen(fd, 'wb') as f:
-                    try:
-                        if write_mode == 'a' and already_exists:
-                            # Stream it in chunks so you don't run out of memory
-                            # when appending to a large file.
-                            with open(filepath, 'rb') as old:
-                                while True:
-                                    chunk = old.read(8192)
-                                    if not chunk:
-                                        break
-                                    f.write(chunk)
-                        # ─── now write your new data (same for 'w' or 'a') ───
-                        f.write(data.encode(encoding))
-                        f.flush()
-                        os.fsync(f.fileno())
-                    except OSError as e:
-                        raise RuntimeError(f"Failed to write data to temp file {tmp_path!r}: {e}") from e
-                    # Restore the original permissions if we had them
-                    if orig_mode is not None:
-                        try:
-                            os.chmod(tmp_path, orig_mode)
-                        except OSError as e:
-                            raise RuntimeError(f"Failed to restore permissions for {tmp_path!r}: {e}") from e
-                    try:
-                        os.replace(tmp_path, filepath)
-                        tmp_path = None  # Ownership transferred: don’t clean up below
-                    except OSError as e:
-                        raise RuntimeError(f"Failed to replace {filepath!r} with {tmp_path!r}: {e}") from e
-            finally: # Only clean up if ownership was not transferred.
-                if tmp_path is not None and os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            # On Windows, we can’t fsync() the directory, so we just assume the rename is atomic.
-            if sys.platform in ('linux', 'darwin'):
-                # On POSIX, renames aren’t guaranteed to land on disk until the directory is synced.
-                dir_fd = None
-                try:
-                    dir_fd = os.open(dir_name, os.O_DIRECTORY)
-                    os.fsync(dir_fd)
-                except OSError as e:
-                    raise RuntimeError(f"Directory fsync failed for {dir_name!r}: {e}") from e
-                finally:
-                    if dir_fd is not None:
-                        os.close(dir_fd)
-        finally:  # Release the lock
-            if locked:
-                logging.debug(f"Unlocking {lock_path!r} after atomic write.")
-                if sys.platform == "win32":
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    fcntl.flock(lock_file, fcntl.LOCK_UN)
-            lock_file.close()
-            logging.debug(f"Released lock on {lock_path!r} after successful atomic write.")
+        with lock:
+            # atomicwrites will write to a temp file in the same dir then os.replace()
+            # overwrite=(write_mode=='w') means "w" replaces, "a" appends
+            with atomic_write(path, mode=mode, overwrite=(write_mode == 'w'),
+                              encoding=text_enc, preserve_mode=True) as f:
+                f.write(data)
+    except Timeout:
+        raise RuntimeError(f"Could not acquire lock on {lock_path!r} within {lock_timeout} seconds")
 
 
 def fix_mojibake(filepath: str, make_backup: bool = True,
@@ -2719,7 +2619,7 @@ def fix_mojibake(filepath: str, make_backup: bool = True,
                 except OSError:
                     logging.exception(f"Failed to create backup for {filepath}.")
                     return
-            atomic_write(filepath, current_text, 'w', encoding='utf-8'):
+            my_atomic_write(filepath, current_text, 'w', encoding='utf-8')
             logging.info(f"✔ Successfully fixed mojibake in {filepath}")
 
 
