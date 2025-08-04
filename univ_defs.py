@@ -2743,12 +2743,15 @@ def open_terminal_and_run_command(the_command: str,
 def is_process_running(process_name: str) -> bool:
     """Check if a process with the given name is running."""
     import subprocess
+    fallback_logging_config()
     try:
-        # Use pgrep to search for the process
-        subprocess.run(['pgrep', '-x', process_name],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        the_command = ['pgrep', '-f', process_name]
+        results = subprocess.run(the_command, capture_output=True, text=True)
+        if results.returncode != 0:
+            return False
         return True
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error occurred: {e}")
         return False
 
 
