@@ -67,22 +67,24 @@ class PlotOptions:
     def __init__(self) -> None:
         """Initialize PlotOptions class with default values."""
         # Ideas for improving this parent class: https://chatgpt.com/share/6876a7e2-da84-8006-9c8f-100d243b73e4
-        self.myfigsize   = (16, 9)
-        self.fsize       = 24
-        self.dpi_choice  = 300
-        self.markers     = ['o',     's',      '^',         'v',          '<',           '>']
-        self.colors      = ['black', 'red',    'blue',      'green',      'purple']      # Used for lines in light mode or for shaded areas in dark mode
-        self.lightcolors = ['grey',  'pink',   'lightblue', 'lightgreen', 'lightpurple']  # Used for shaded areas in light mode or for lines in dark mode
-        self.linestyles  = ['solid', 'dashed', 'dashdot',   'dotted']
-        self.dark_mode   = 0  # 1 = dark mode, 0 = light mode
+        self.myfigsize: tuple[int, int] = (16, 9)
+        self.fsize:             int = 24
+        self.dpi_choice:        int = 300
+        # self.colors      are used for shaded areas in light mode or for lines in dark mode
+        # self.lightcolors are used for lines in light mode or for shaded areas in dark mode
+        self.markers:     list[str] = ['o',     's',      '^',         'v',          '<',     '>']
+        self.colors:      list[str] = ['black', 'red',    'blue',      'green',      'purple']
+        self.lightcolors: list[str] = ['grey',  'pink',   'lightblue', 'lightgreen', 'lightpurple']
+        self.linestyles:  list[str] = ['solid', 'dashed', 'dashdot',   'dotted']
+        self.dark_mode:         int = 0  # 1 = dark mode, 0 = light mode
         if self.dark_mode:
-            self.background_color = '#000000'
-            self.text_color       = '#FFFFFF'
-            self.colors      = [c.replace('black', 'darkgrey') for c in self.colors]
-            self.lightcolors = [c.replace('grey', 'lightgrey') for c in self.lightcolors]
+            self.background_color:  str = '#000000'
+            self.text_color:        str = '#FFFFFF'
+            self.colors:      list[str] = [c.replace('black', 'darkgrey') for c in self.colors]
+            self.lightcolors: list[str] = [c.replace('grey', 'lightgrey') for c in self.lightcolors]
         else:
-            self.background_color = '#FFFFFF'
-            self.text_color       = '#000000'
+            self.background_color:  str = '#FFFFFF'
+            self.text_color:        str = '#000000'
 
 
 class UnivClass:
@@ -644,43 +646,6 @@ def analyze_results(results: dict[str, str]) -> str:
             print(f" - {method}: {name}")
 
         return primary_name
-
-
-def kill_process(pname: str) -> None:
-    """Kill a process by its name, then check if it is still running and retry if needed. Make sure the process name is unique to avoid killing unintended processes."""
-    import time
-    import signal
-    import subprocess
-    while True:
-        # Find the process IDs of the given process name
-        process_ids = []
-        try:
-            process_list = subprocess.check_output(["pgrep", "-f", pname]).decode(DEFAULT_ENCODING)
-            process_ids = process_list.splitlines()
-        except subprocess.CalledProcessError as e:
-            raise ValueError(f"Failed to find process with name {pname}. Make sure the process name is correct and unique: {e}") from e
-
-        if process_ids:
-            for pid in process_ids:
-                print(f"Killing {pname} process with PID: {pid}")
-                try:
-                    os.kill(int(pid), signal.SIGTERM)  # Send SIGTERM to terminate the process
-                    print(f"Sent SIGTERM to PID {pid}")
-                except ProcessLookupError as e:
-                    raise ValueError(f"Process with PID {pid} not found. It may have already exited: {e}") from e
-        else:
-            print(f"No {pname} process found.")
-            break
-
-        # Check if the process is still running
-        time.sleep(2)  # Wait for 2 seconds before checking again
-        process_ids = subprocess.check_output(["pgrep", "-f", pname]).decode(DEFAULT_ENCODING).splitlines()
-
-        if not process_ids:
-            print(f"{pname} process successfully killed.")
-            break  # Exit the loop when the process is no longer running
-        else:
-            print(f"{pname} is still running. Retrying...")
 
 
 def ensure_even_dimensions(image_path: str) -> None:
@@ -1767,28 +1732,35 @@ def check_python_formatting(path: str, diff_choice: int = 1) -> bool:
 
     if BACKTICK in src:
         logging.warning(f"File {path} contains the backtick character ({BACKTICK!r}). Use straight quotation marks (') instead.")
-        if not ask_and_replace(path, old=BACKTICK, new="'", label='backtick', diff_choice=diff_choice,
+        if not ask_and_replace(old_str=BACKTICK, new_str="'", path=path, label='backtick',
+                               diff_choice=diff_choice,
                                description=f"Replace backtick ({BACKTICK}) with straight apostrophe (')"):
             return False
     if LSQUOTE in src or RSQUOTE in src:
         logging.warning(f"File {path} contains curly single quotation marks ({LSQUOTE!r} or {RSQUOTE!r}). Use straight apostrophes (') instead.")
-        if not ask_and_replace(path, old=LSQUOTE, new="'", label='left-curly-apostrophe', diff_choice=diff_choice,
+        if not ask_and_replace(old_str=LSQUOTE, new_str="'", path=path, label='left-curly-apostrophe',
+                               diff_choice=diff_choice,
                                description=f"Replace left curly apostrophe ({LSQUOTE}) with straight apostrophe (')"):
             return False
-        if not ask_and_replace(path, old=RSQUOTE, new="'", label='right-curly-apostrophe', diff_choice=diff_choice,
+        if not ask_and_replace(old_str=RSQUOTE, new_str="'", path=path, label='right-curly-apostrophe',
+                               diff_choice=diff_choice,
                                description=f"Replace right curly apostrophe ({RSQUOTE}) with straight apostrophe (')"):
             return False
     if LDQUOTE in src or RDQUOTE in src:
         logging.warning(f'File {path} contains curly double quotation marks ({LDQUOTE!r} or {RDQUOTE!r}). Use straight quotation marks (") instead.')
-        if not ask_and_replace(path, old=LDQUOTE, new='"', label='left-curly-quotation-mark', diff_choice=diff_choice,
+        if not ask_and_replace(old_str=LDQUOTE, new_str='"', path=path,
+                               label='left-curly-quotation-mark',
+                               diff_choice=diff_choice,
                                description=f'Replace left curly double quotation mark ({LDQUOTE}) with straight double quotation mark (")'):
             return False
-        if not ask_and_replace(path, old=RDQUOTE, new='"', label='right-curly-quotation-mark', diff_choice=diff_choice,
+        if not ask_and_replace(old_str=RDQUOTE, new_str='"', path=path, label='right-curly-quotation-mark',
+                               diff_choice=diff_choice,
                                description=f'Replace right curly double quotation mark ({RDQUOTE}) with straight double quotation mark (")'):
             return False
     if HORIZONTAL_ELLIPSIS in src:
         logging.warning(f"File {path} contains the horizontal ellipsis character ({HORIZONTAL_ELLIPSIS!r}). Use three periods (...) instead.")
-        if not ask_and_replace(path, old=HORIZONTAL_ELLIPSIS, new='...', label='horizontal-ellipsis', diff_choice=diff_choice,
+        if not ask_and_replace(old_str=HORIZONTAL_ELLIPSIS, new_str='...', path=path,
+                               label='horizontal-ellipsis', diff_choice=diff_choice,
                                description=f"Replace horizontal ellipsis ({HORIZONTAL_ELLIPSIS}) with three periods (...)"):
             return False
 
@@ -2167,10 +2139,38 @@ def my_diff(orig_text: str, changed_text: str, orig_path: str,
         logging.error(f"Unsupported diff_choice = {diff_choice}. Must be a non-negative integer.")
 
 
-def diff_and_confirm(orig_text: str, changed_text: str, path: str, label: str, skip_compile: bool = False,
-                     diff_choice: int = 1, changed_color: str = ANSI_CYAN,
-                     deleted_color: str = ANSI_RED, added_color: str = ANSI_YELLOW,
-                     the_fix: str = "", description: str = "") -> bool:
+def is_python_script(path: str) -> bool:
+    """
+    Return True if 'path' looks like a Python script:
+      1. It ends in .py or .pyw
+      2. Or it is executable AND its first line is a python shebang
+    """
+    import stat
+    # Common extensions
+    if any(path.endswith(ext) for ext in python_extensions):
+        return True
+
+    # No-extension scripts: check for executable bit + python shebang
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+
+    # Must be a regular file and executable by owner/group/other
+    if not stat.S_ISREG(st.st_mode) or not (st.st_mode & (stat.S_IXUSR|stat.S_IXGRP|stat.S_IXOTH)):
+        return False
+
+    # Try to read the first line and look for a python shebang
+    first_line = my_fopen(path, suppress_errors=True, rawlog=False, numlines=1)
+    if not first_line:
+        return False
+    return bool(re.match(r'#!.*\bpython[0-9.]*\b', first_line))
+
+
+def diff_and_confirm(orig_text: str, changed_text: str, path: str, label: str = "",
+                     skip_compile: bool = False, diff_choice: int = 1,
+                     changed_color: str = ANSI_CYAN, deleted_color: str = ANSI_RED,
+                     added_color: str = ANSI_YELLOW, the_fix: str = "", description: str = "") -> bool:
     """
     Show a unified diff of orig_text → changed_text with a number of context lines
     (determined by 'diff_choice') around each hunk, log using 'label' and 'description', then prompt.
@@ -2181,15 +2181,16 @@ def diff_and_confirm(orig_text: str, changed_text: str, path: str, label: str, s
         orig_text:     Original text to compare against.
         changed_text:  Proposed changes to the original text.
         path:          Path to the file being modified.
-        label:         A short label for the issue being fixed.
-        skip_compile:  If True, do not try to compile the changed text before writing.
-        diff_choice:   How many context lines to show in the diff (0 = old-style diff, 1 = unified diff with 0 context lines, 2+ = unified diff with 'diff_choice - 1' context lines).
+        label:         A short label for the issue being fixed (default "").
+        skip_compile:  If True, do not try to compile the changed text before writing (default False).
+        diff_choice:   How many context lines to show in the diff (0 = old-style diff, 1 = unified diff with 0 context lines, 2+ = unified diff with 'diff_choice - 1' context lines) (default 1).
         changed_color: Color to use for unchanged characters in the changed lines in the diff (default ANSI_CYAN).
         deleted_color: Color to use for the deleted characters in orig lines (default ANSI_YELLOW).
         added_color:   Color to use for the added characters in changed lines (default ANSI_GREEN).
-        the_fix:       A string describing the fix being applied (e.g. "autopep8", "manual edit").
-        description:   A longer description of the issue being fixed.
+        the_fix:       A string describing the fix being applied (e.g. "autopep8", "manual edit") (default "").
+        description:   A longer description of the issue being fixed (default "").
 
+        
     Returns False if the user chose to quit; True otherwise.
     """
     from pathlib import Path
@@ -2197,15 +2198,25 @@ def diff_and_confirm(orig_text: str, changed_text: str, path: str, label: str, s
     logging.debug(f"At the top of the function {sys._getframe(1).f_code.co_name}(), {diff_choice=}")
     my_diff(orig_text, changed_text, path, diff_choice=diff_choice,
             changed_color=changed_color, deleted_color=deleted_color, added_color=added_color)
-    logging.info(f"End of proposed {ANSI_RED}{label}{ANSI_RESET} changes to {path} using {the_fix}.")
-    logging.info(f"{ANSI_RED}{label}{ANSI_RESET}: {ANSI_YELLOW}{description}{ANSI_RESET}")
+    label_str = f"{ANSI_RED}{label}{ANSI_RESET}" if label     else ""
+    fix_str   = f" using {the_fix}"              if the_fix   else ""
+    subject   = f"{label_str} "                  if label_str else ""
+    logging.info(f"End of proposed {subject}changes to {path}{fix_str}.")
+    if description:
+        prefix = f"{label_str}: "                if label_str else ""
+        logging.info(f"{prefix}{ANSI_YELLOW}{description}{ANSI_RESET}")
     ans = input("Apply these changes? [y/N/q] ").strip().lower()
     if ans in ("y", "yes"):
-        if not skip_compile and not compile_code(changed_text):
-            logging.error(f"{ANSI_RED}Failed to compile the changed text. Aborting write.{ANSI_RESET}")
-            return True  # don't write if it won't compile
+        # If the user hasn't chosen to skip compilation and this is a Python script,
+        # try to compile the changed text before writing it. If compilation fails, abort the write.
+        if not skip_compile and is_python_script(path) and not compile_code(changed_text):
+            logging.error(f"{ANSI_RED}Failed to compile the changed python script. Aborting write.{ANSI_RESET}")
+            return False  # Don't write if it won't compile, and don't continue.
         Path(path).write_text(changed_text, encoding=DEFAULT_ENCODING)
-        logging.info(f"{ANSI_GREEN}Applied {the_fix} to {path}{ANSI_RESET}")
+        if the_fix:
+            logging.info(f"{ANSI_GREEN}Applied {the_fix} to {path}{ANSI_RESET}")
+        else:
+            logging.info(f"{ANSI_GREEN}Applied changes to {path}{ANSI_RESET}")
     elif ans in ("q", "quit", "exit"):
         logging.info(f"{ANSI_YELLOW}Exiting without further changes.{ANSI_RESET}")
         return False
@@ -2214,7 +2225,7 @@ def diff_and_confirm(orig_text: str, changed_text: str, path: str, label: str, s
     return True
 
 
-def ask_and_autopep8(path: str, code: str, description: str, diff_choice: int = 1,
+def ask_and_autopep8(path: str, code: str, description: str = "", diff_choice: int = 1,
                      changed_color: str = ANSI_CYAN, deleted_color: str = ANSI_RED,
                      added_color: str = ANSI_YELLOW) -> bool:
     """
@@ -2226,8 +2237,8 @@ def ask_and_autopep8(path: str, code: str, description: str, diff_choice: int = 
     Parameters:
         path:          The path to the file to modify.
         code:          The specific PEP 8 violation code to fix.
-        description:   A description of the issue being fixed.
-        diff_choice:   How many context lines to show in the diff (0 = old-style diff, 1 = unified diff with 0 context lines, 2+ = unified diff with 'diff_choice - 1' context lines).
+        description:   A description of the issue being fixed (default "").
+        diff_choice:   How many context lines to show in the diff (0 = old-style diff, 1 = unified diff with 0 context lines, 2+ = unified diff with 'diff_choice - 1' context lines) (default 1).
         changed_color: Color to use for unchanged characters in the changed lines in the diff (default ANSI_CYAN).
         deleted_color: Color to use for the deleted characters in orig lines (default ANSI_YELLOW).
         added_color:   Color to use for the added characters in changed lines (default ANSI_GREEN).
@@ -2272,18 +2283,41 @@ def ask_and_autopep8(path: str, code: str, description: str, diff_choice: int = 
                             the_fix=the_fix, description=description)
 
 
-def ask_and_replace(path: str, old: str, new: str, label: str, diff_choice: int = 1, description: str = "",
-                    changed_color: str = ANSI_CYAN, deleted_color: str = ANSI_RED, added_color: str = ANSI_YELLOW) -> bool:
-    """Read 'path', do orig.replace(old, new), then show a diff and ask to confirm."""
+def ask_and_replace(old_str: str, new_str: str, path: str,  label: str = "",
+                    diff_choice: int = 1, description: str = "",
+                    changed_color: str = ANSI_CYAN, deleted_color: str = ANSI_RED,
+                    added_color: str = ANSI_YELLOW, skip_compile: bool = False) -> bool:
+    """
+    Read 'path', do orig.replace(old, new), then show a diff and ask to confirm.
+
+    Parameters:
+        old_str:       Old string to search for.
+        new_str:       New string to replace the old string.
+        path:          Path to the file being modified.
+        label:         A short label for the issue being fixed (default "").
+        skip_compile:  If True, do not try to compile the changed text before writing (default False).
+        diff_choice:   How many context lines to show in the diff (0 = old-style diff, 1 = unified diff with 0 context lines, 2+ = unified diff with 'diff_choice - 1' context lines) (default 1).
+        changed_color: Color to use for unchanged characters in the changed lines in the diff (default ANSI_CYAN).
+        deleted_color: Color to use for the deleted characters in orig lines (default ANSI_YELLOW).
+        added_color:   Color to use for the added characters in changed lines (default ANSI_GREEN).
+        the_fix:       A string describing the fix being applied (e.g. "autopep8", "manual edit") (default "").
+        description:   A longer description of the issue being fixed (default "").
+
+    Returns False if the user chose to quit; True otherwise.
+
+    """
     fallback_logging_config()
     orig_text = my_fopen(path)
-    changed_text = orig_text.replace(old, new)
+    changed_text = orig_text.replace(old_str, new_str)
     if changed_text == orig_text:
-        logging.info(f"No occurrences of {label} in {path}.")
+        if label:
+            logging.info(f"No occurrences of {label} in {path}.")
+        else:
+            logging.info(f"No occurrences of '{old_str}' in {path}.")
         return True
-    the_fix = f"replace '{old}' with '{new}'"
+    the_fix = f"replace '{old_str}' with '{new_str}'"
     return diff_and_confirm(orig_text, changed_text, path, label=label, diff_choice=diff_choice,
-                            changed_color=changed_color, deleted_color=deleted_color, added_color=added_color,
+                            changed_color=changed_color, deleted_color=deleted_color, added_color=added_color, skip_compile=skip_compile,
                             the_fix=the_fix, description=description)
 
 
@@ -2419,7 +2453,6 @@ def verify_script(thepath: str, thescript: str) -> None:
         logging.info(f"Overwriting {thepath} with the audit script.")
         with open(thepath, 'w', encoding=DEFAULT_ENCODING) as f:
             f.write(thescript)
-    # else: contents match exactly, nothing to do
 
 
 def decode_utf8(raw_bytes: bytes, path: str = "input string") -> str | None:
@@ -2739,6 +2772,43 @@ def open_terminal_and_run_command(the_command: str, close_after: bool = False,
         bash_cmd = f'{the_command}; exec bash'
     terminal_args += ['--', 'bash', '-ic', bash_cmd]
     subprocess.Popen(terminal_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def kill_process(pname: str) -> None:
+    """Kill a process by its name, then check if it is still running and retry if needed. Make sure the process name is unique to avoid killing unintended processes."""
+    import time
+    import signal
+    import subprocess
+    while True:
+        # Find the process IDs of the given process name
+        process_ids = []
+        try:
+            process_list = subprocess.check_output(["pgrep", "-f", pname]).decode(DEFAULT_ENCODING)
+            process_ids = process_list.splitlines()
+        except subprocess.CalledProcessError as e:
+            raise ValueError(f"Failed to find process with name {pname}. Make sure the process name is correct and unique: {e}") from e
+
+        if process_ids:
+            for pid in process_ids:
+                print(f"Killing {pname} process with PID: {pid}")
+                try:
+                    os.kill(int(pid), signal.SIGTERM)  # Send SIGTERM to terminate the process
+                    print(f"Sent SIGTERM to PID {pid}")
+                except ProcessLookupError as e:
+                    raise ValueError(f"Process with PID {pid} not found. It may have already exited: {e}") from e
+        else:
+            print(f"No {pname} process found.")
+            break
+
+        # Check if the process is still running
+        time.sleep(2)  # Wait for 2 seconds before checking again
+        process_ids = subprocess.check_output(["pgrep", "-f", pname]).decode(DEFAULT_ENCODING).splitlines()
+
+        if not process_ids:
+            print(f"{pname} process successfully killed.")
+            break  # Exit the loop when the process is no longer running
+        else:
+            print(f"{pname} is still running. Retrying...")
 
 
 def is_process_running(process_name: str) -> bool:
