@@ -2668,7 +2668,7 @@ def treeview_new_files(directory: str | os.PathLike[str],
         directory:      The directory to scan.
         last_file_path: The optional path to a chosen file. Only files newer than this will be printed.
         last_mtime:     The modification time of the last_file_path. If None, all files will be considered.
-        maxlines:       The maximum number of lines to read from each file. 0 means don't read at all, -1 means read all lines, otherwise read up to maxlines.
+        maxlines:       The maximum number of lines to read from each file. 0 means don't read at all, -1 means read all lines, otherwise read up to maxlines (default 0).
         prefix:         The prefix to use for logging output (default '').
         is_last:        Whether this is the last item in the current level (default True).
         level:          The current recursion level (default 0).
@@ -2718,7 +2718,7 @@ def treeview_new_files(directory: str | os.PathLike[str],
     has_relevant_files = False  # Flag to indicate if current directory has relevant files
 
     try:
-        entries = sorted(directory.iterdir(), key=lambda e: e.name.lower())
+        entries = sorted(directory.iterdir(), key=lambda e: e.name.casefold())
     except PermissionError:
         logging.error(f"{prefix}└── [Permission Denied]")
         return False
@@ -2769,10 +2769,19 @@ def treeview_new_files(directory: str | os.PathLike[str],
             # For root level, do not print the directory name
             child_prefix = prefix
 
-        # Print relevant files
+        # Print subdirectories first
+        for i, subdir in enumerate(subdirectories):
+            is_sub_last = (i == len(subdirectories) - 1) and (len(relevant_entries) == 0)
+            # Only scan the subdirectory if it isn't excluded
+            if subdir.name not in excluded_dirs and subdir not in already_printed:
+                treeview_new_files(subdir, last_file_path=last_file_path, last_mtime=last_mtime,
+                                   maxlines=maxlines, prefix=child_prefix, is_last=is_sub_last,
+                                   level=level + 1)
+
+        # Print relevant files next
         for i, file_entry in enumerate(relevant_entries):
             # Determine if this is the last file to adjust connector
-            is_file_last = (i == len(relevant_entries) - 1) and not subdirectories
+            is_file_last = (i == len(relevant_entries) - 1)
             file_connector = '└── ' if is_file_last else '├── '
             contents_str = f"{file_entry.name} contents:" if maxlines != 0 else f"{file_entry.name}"
             logging.info(f"{child_prefix}{file_connector}{contents_str}")
@@ -2793,15 +2802,9 @@ def treeview_new_files(directory: str | os.PathLike[str],
                     logging.info(indented_contents)
             except Exception:  # Catch any unexpected errors from reading the file without crashing.
                 logging.exception(f"{child_prefix}    Error reading '{file_entry}'.")
-            logging.info("")  # Add an empty line for separation
+            if maxlines != 0:  # Add an empty line for separation, but only if printing contents
+                logging.info("")
 
-        # Print subdirectories
-        for i, subdir in enumerate(subdirectories):
-            is_sub_last = (i == len(subdirectories) - 1)
-            # Only scan the subdirectory if it isn't excluded
-            if subdir.name not in excluded_dirs and subdir not in already_printed:
-                treeview_new_files(subdir, last_file_path=last_file_path, last_mtime=last_mtime, maxlines=maxlines,
-                                   prefix=child_prefix, is_last=is_sub_last, level=level + 1)
     return has_relevant_files
 
 
