@@ -2656,15 +2656,60 @@ def fix_mojibake(filepath: str, make_backup: bool = True,
             logging.info(f"✔ Successfully fixed mojibake in {filepath}")
 
 
-def treeview_new_files(directory: str, last_file_path: str, last_mtime: float,
+def treeview_new_files(directory: str | os.PathLike[str],
+                       last_file_path: str | os.PathLike[str] | None = None,
+                       last_mtime: float | None = None, maxlines: int = 0,
                        prefix: str = '', is_last: bool = True, level: int = 0,
                        state: dict = None) -> bool:
-    """Recursively scan the directory, print the contents of files newer than last_file_path (and store its modification date in last_mtime). Return True if any relevant files are found."""
+    """
+    Recursively scan the directory, print the contents of files newer than last_file_path (if provided- if so store its modification date in last_mtime). Return True if any relevant files are found.
+    
+    Parameters:
+        directory:      The directory to scan.
+        last_file_path: The optional path to a chosen file. Only files newer than this will be printed.
+        last_mtime:     The modification time of the last_file_path. If None, all files will be considered.
+        maxlines:       The maximum number of lines to read from each file. 0 means don't read at all, -1 means read all lines, otherwise read up to maxlines.
+        prefix:         The prefix to use for logging output (default '').
+        is_last:        Whether this is the last item in the current level (default True).
+        level:          The current recursion level (default 0).
+        state:          A dictionary to maintain state across recursive calls (default None).
+    
+    Raises:
+        ValueError: If the directory is not a valid directory or does not exist.
+    
+    Returns:
+        bool: True if any relevant files are found, False otherwise.
+    """
+    import datetime as dt
     fallback_logging_config(rawlog=True)
+
+    directory = Path(directory)
+    if not directory.exists():
+        logging.error(f"{prefix}└── [Directory does not exist: {directory}]")
+        return False
+    if not directory.is_dir():
+        logging.error(f"{prefix}└── [Not a directory: {directory}]")
+        return False
+
+    if last_file_path is None:
+        last_mtime = 0
+        logging.debug(f"{prefix}No last file path provided, considering all files.")
+    else:
+        last_file_path = Path(last_file_path).resolve()
+        if not last_file_path.is_file():
+            logging.error(f"{prefix}└── [Last file path does not exist: {last_file_path}]")
+            return False
+        if not last_file_path.exists():
+            logging.error(f"{prefix}└── [Last file path does not exist: {last_file_path}]")
+            return False
+        last_mtime = last_file_path.stat().st_mtime
+        last_mtime_readable = dt.datetime.fromtimestamp(last_mtime).strftime('%Y-%m-%d %H:%M:%S')
+        logging.debug(f"{prefix}Last file path: {last_file_path} (mtime: {last_mtime_readable})")
+
     if state is None:
         state = {'excluded_dirs'   : {'__pycache__'},
                  'already_printed' : set(),
-                 'my_filepath'     : os.path.abspath(__file__)}
+                 'my_filepath'     : Path(__file__).resolve()}
     already_printed = state['already_printed']
     excluded_dirs   = state['excluded_dirs']
     my_filepath     = state['my_filepath']
@@ -2673,7 +2718,7 @@ def treeview_new_files(directory: str, last_file_path: str, last_mtime: float,
     has_relevant_files = False  # Flag to indicate if current directory has relevant files
 
     try:
-        entries = sorted(os.scandir(directory), key=lambda e: e.name.lower())
+        entries = sorted(directory.iterdir(), key=lambda e: e.name.lower())
     except PermissionError:
         logging.error(f"{prefix}└── [Permission Denied]")
         return False
@@ -2683,12 +2728,12 @@ def treeview_new_files(directory: str, last_file_path: str, last_mtime: float,
         entry for entry in entries
         if not (
             (entry.is_file() and (
-                entry.path == last_file_path or
-                entry.path == my_filepath    or
-                os.path.basename(entry.path).startswith('.')
+                entry == last_file_path or
+                entry == my_filepath    or
+                entry.name.startswith('.')
             )) or
-            (entry.is_dir() and os.path.basename(entry.path) in excluded_dirs) or
-            (entry.is_dir() and entry.path in already_printed)
+            (entry.is_dir() and entry.name in excluded_dirs) or
+            (entry.is_dir() and entry in already_printed)
         )
     ]
 
@@ -2704,8 +2749,9 @@ def treeview_new_files(directory: str, last_file_path: str, last_mtime: float,
                 has_relevant_files = True
         elif entry.is_dir():
             sub_has_relevant = treeview_new_files(
-                entry.path, last_file_path, last_mtime,
-                prefix + ('    ' if is_last else '│   '), False, level + 1
+                entry, last_file_path=last_file_path, last_mtime=last_mtime,
+                maxlines=maxlines, prefix=prefix + ('    ' if is_last else '│   '),
+                is_last=False, level=level + 1
             )
             if sub_has_relevant:
                 subdirectories.append(entry)
@@ -2715,7 +2761,7 @@ def treeview_new_files(directory: str, last_file_path: str, last_mtime: float,
         if level > 0:
             # Print the directory name only if it's not the root directory
             connector = '└── ' if is_last else '├── '
-            logging.info(f"{prefix}{connector}{os.path.basename(directory)}/")
+            logging.info(f"{prefix}{connector}{directory.name}/")
 
             # Update the prefix for child entries
             child_prefix = prefix + ('    ' if is_last else '│   ')
@@ -2728,24 +2774,34 @@ def treeview_new_files(directory: str, last_file_path: str, last_mtime: float,
             # Determine if this is the last file to adjust connector
             is_file_last = (i == len(relevant_entries) - 1) and not subdirectories
             file_connector = '└── ' if is_file_last else '├── '
-            logging.info(f"{child_prefix}{file_connector}{os.path.basename(file_entry.path)} contents:")
+            contents_str = f"{file_entry.name} contents:" if maxlines != 0 else f"{file_entry.name}"
+            logging.info(f"{child_prefix}{file_connector}{contents_str}")
             try:
-                with open(file_entry.path, 'r', encoding=DEFAULT_ENCODING) as f:
-                    contents = f.read()
+                if maxlines != 0:  # Only open if not disabled
+                    with open(file_entry, 'r', encoding=DEFAULT_ENCODING) as f:
+                        if maxlines > 0:
+                            # Read only up to maxlines
+                            lines = []
+                            for i, line in enumerate(f):
+                                if i >= maxlines:
+                                    break
+                                lines.append(line.rstrip("\n"))
+                        else:  # maxlines == -1 → read all
+                            lines = [line.rstrip("\n") for line in f]
                     # Indent file contents for better readability
-                    indented_contents = '\n'.join([f"{child_prefix}    {line}" for line in contents.splitlines()])
+                    indented_contents = '\n'.join(f"{child_prefix}    {line}" for line in lines)
                     logging.info(indented_contents)
             except Exception:  # Catch any unexpected errors from reading the file without crashing.
-                logging.exception(f"{child_prefix}    Error reading '{file_entry.path}'.", exc_info=True)
+                logging.exception(f"{child_prefix}    Error reading '{file_entry}'.")
             logging.info("")  # Add an empty line for separation
 
         # Print subdirectories
         for i, subdir in enumerate(subdirectories):
             is_sub_last = (i == len(subdirectories) - 1)
             # Only scan the subdirectory if it isn't excluded
-            if os.path.basename(subdir.path) not in excluded_dirs and subdir.path not in already_printed:
-                treeview_new_files(subdir.path, last_file_path, last_mtime, child_prefix, is_sub_last, level + 1)
-
+            if subdir.name not in excluded_dirs and subdir not in already_printed:
+                treeview_new_files(subdir, last_file_path=last_file_path, last_mtime=last_mtime, maxlines=maxlines,
+                                   prefix=child_prefix, is_last=is_sub_last, level=level + 1)
     return has_relevant_files
 
 
