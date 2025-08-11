@@ -2656,11 +2656,11 @@ def fix_mojibake(filepath: str, make_backup: bool = True,
             logging.info(f"✔ Successfully fixed mojibake in {filepath}")
 
 
-def treeview_new_files(directory: str | os.PathLike[str],
+def treeview_new_files(directory:      str | os.PathLike[str],
                        last_file_path: str | os.PathLike[str] | None = None,
                        last_mtime: float | None = None, maxlines: int = 0,
                        prefix: str = '', is_last: bool = True, level: int = 0,
-                       state: dict = None) -> bool:
+                       state: dict = None, probe_only: bool = False) -> bool:
     """
     Recursively scan the directory, print the contents of files newer than last_file_path (if provided- if so store its modification date in last_mtime). Return True if any relevant files are found.
     
@@ -2673,6 +2673,7 @@ def treeview_new_files(directory: str | os.PathLike[str],
         is_last:        Whether this is the last item in the current level (default True).
         level:          The current recursion level (default 0).
         state:          A dictionary to maintain state across recursive calls (default None).
+        probe_only:     If True, do not print file contents, just check for existence of relevant files (default False).
     
     Raises:
         ValueError: If the directory is not a valid directory or does not exist.
@@ -2714,7 +2715,9 @@ def treeview_new_files(directory: str | os.PathLike[str],
     excluded_dirs   = state['excluded_dirs']
     my_filepath     = state['my_filepath']
 
-    already_printed.add(directory)
+    if not probe_only:
+        already_printed.add(directory)
+    
     has_relevant_files = False  # Flag to indicate if current directory has relevant files
 
     try:
@@ -2749,9 +2752,15 @@ def treeview_new_files(directory: str | os.PathLike[str],
                 has_relevant_files = True
         elif entry.is_dir():
             sub_has_relevant = treeview_new_files(
-                entry, last_file_path=last_file_path, last_mtime=last_mtime,
-                maxlines=maxlines, prefix=prefix + ('    ' if is_last else '│   '),
-                is_last=False, level=level + 1
+                entry,
+                last_file_path=last_file_path,
+                last_mtime=last_mtime,
+                maxlines=maxlines,
+                prefix=prefix,              # prefix doesn’t matter in probe mode
+                is_last=False,              # ignored in probe mode
+                level=level + 1,
+                state=state,
+                probe_only=True             # probe mode: do not print contents
             )
             if sub_has_relevant:
                 subdirectories.append(entry)
@@ -2761,7 +2770,7 @@ def treeview_new_files(directory: str | os.PathLike[str],
         if level > 0:
             # Print the directory name only if it's not the root directory
             connector = '└── ' if is_last else '├── '
-            logging.info(f"{prefix}{connector}{directory.name}/")
+            if not probe_only: logging.info(f"{prefix}{connector}{directory.name}/")
 
             # Update the prefix for child entries
             child_prefix = prefix + ('    ' if is_last else '│   ')
@@ -2784,7 +2793,7 @@ def treeview_new_files(directory: str | os.PathLike[str],
             is_file_last = (i == len(relevant_entries) - 1)
             file_connector = '└── ' if is_file_last else '├── '
             contents_str = f"{file_entry.name} contents:" if maxlines != 0 else f"{file_entry.name}"
-            logging.info(f"{child_prefix}{file_connector}{contents_str}")
+            if not probe_only: logging.info(f"{child_prefix}{file_connector}{contents_str}")
             try:
                 if maxlines != 0:  # Only open if not disabled
                     with open(file_entry, 'r', encoding=DEFAULT_ENCODING) as f:
@@ -2799,11 +2808,11 @@ def treeview_new_files(directory: str | os.PathLike[str],
                             lines = [line.rstrip("\n") for line in f]
                     # Indent file contents for better readability
                     indented_contents = '\n'.join(f"{child_prefix}    {line}" for line in lines)
-                    logging.info(indented_contents)
+                    if not probe_only: logging.info(indented_contents)
             except Exception:  # Catch any unexpected errors from reading the file without crashing.
-                logging.exception(f"{child_prefix}    Error reading '{file_entry}'.")
+                if not probe_only: logging.exception(f"{child_prefix}    Error reading '{file_entry}'.")
             if maxlines != 0:  # Add an empty line for separation, but only if printing contents
-                logging.info("")
+                if not probe_only: logging.info("")
 
     return has_relevant_files
 
