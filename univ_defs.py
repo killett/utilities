@@ -536,19 +536,19 @@ def my_fopen(file_path: str | os.PathLike[str], suppress_errors: bool = False,
         return False
     # Does the file end with any of these (non-text) extensions?
     for ext in video_extensions:
-        if file_path.name.endswith(ext):
+        if file_path.name.casefold().endswith(ext):
             if not rawlog:
                 if not suppress_errors: logging.error(f"Skipping video file {file_path}")
                 else:                   logging.info( f"Skipping video file {file_path}")
             return False
     for ext in audio_extensions:
-        if file_path.name.endswith(ext):
+        if file_path.name.casefold().endswith(ext):
             if not rawlog:
                 if not suppress_errors: logging.error(f"Skipping audio file {file_path}")
                 else:                   logging.info( f"Skipping audio file {file_path}")
             return False
     for ext in image_extensions:
-        if file_path.name.endswith(ext):
+        if file_path.name.casefold().endswith(ext):
             if not rawlog:
                 if not suppress_errors: logging.error(f"Skipping image file {file_path}")
                 else:                   logging.info( f"Skipping image file {file_path}")
@@ -2252,7 +2252,7 @@ def is_python_script(path: str | os.PathLike[str]) -> bool:
     import stat
     path = Path(path)
     # Common extensions
-    if any(path.name.endswith(ext) for ext in python_extensions):
+    if any(path.name.casefold().endswith(ext) for ext in python_extensions):
         return True
 
     # No-extension scripts: check for executable bit + python shebang
@@ -2994,7 +2994,7 @@ def fix_mojibake(filepath: str | os.PathLike[str], make_backup: bool = True,
         logging.info(f"✔ Fixed mojibake: {filepath}")
 
     # If the text is from an HTML file, ensure it has a UTF-8 meta tag
-    if filepath.lower().endswith(('.html','.htm')):
+    if filepath.name.casefold().endswith(('.html','.htm')):
         current_text = ensure_utf8_meta(current_text)
 
     # If we have fixed the text, write it back
@@ -3550,13 +3550,13 @@ def open_dir_in_VLC(the_dir: str | os.PathLike[str], sort_choice: str = "sort_by
         for root, dirs, files in os.walk(the_dir):
             for filename in files:
                 file_path = Path(root) / filename
-                if file_path.is_file() and not filename.endswith('.m3u'):
+                if file_path.is_file() and not filename.casefold().endswith('.m3u'):
                     mod_time = file_path.stat().st_mtime
                     files_with_times.append((mod_time, file_path))
     else:
         for item in the_dir.iterdir():
             item_path = the_dir / item
-            if item_path.is_file() and not item.name.endswith('.m3u'):
+            if item_path.is_file() and not item.name.casefold().endswith('.m3u'):
                 mod_time = item_path.stat().st_mtime
                 files_with_times.append((mod_time, item_path))
             elif item_path.is_dir():
@@ -3598,7 +3598,7 @@ def remove_prefix_from_filename(filepath: str | os.PathLike[str], prefix: str) -
     
     Parameters:
     - filepath: The path to the file whose name may need to be changed.
-    - prefix: The prefix to remove from the filename.
+    - prefix:   The prefix to remove from the filename.
 
     Returns:
     True if the file was successfully renamed, or if it didn't need renaming.
@@ -3609,9 +3609,9 @@ def remove_prefix_from_filename(filepath: str | os.PathLike[str], prefix: str) -
     OSError: If the rename operation fails due to an OS error (e.g., permission denied).
     """
     fallback_logging_config()
-    filepath = Path(filepath)
-    if not filepath.is_file():
-        logging.warning(f"File '{filepath}' does not exist or is not a file.")
+    filepath = Path(filepath).expanduser().resolve()
+    if not filepath.exists():
+        logging.warning(f"File or directory '{filepath}' does not exist.")
         return False
     file = filepath.name
     if file.startswith(prefix):
@@ -3641,7 +3641,7 @@ def remove_prefix_from_html_title(filepath: str | os.PathLike[str], prefix: str)
     if not filepath.is_file():
         logging.warning(f"File '{filepath}' does not exist or is not a file.")
         return False
-    if not filepath.endswith('.html') and not filepath.endswith('.htm'):
+    if not filepath.name.casefold().endswith('.html') and not filepath.name.casefold().endswith('.htm'):
         logging.warning(f"File '{filepath}' is not an HTML or HTM file.")
         return False
     html = my_fopen(filepath)
