@@ -21,11 +21,11 @@ PY_VERSION: int = 3.11
 DEFAULT_ENCODING: str = 'utf-8'  # This is the default encoding used for reading and writing text files.
 
 # ANSI escape codes
-ANSI_RED: str    = "\033[91m"
-ANSI_GREEN: str  = "\033[92m"  # this is bold/bright green on Linux but orange on my Mac
+ANSI_RED:    str = "\033[91m"
+ANSI_GREEN:  str = "\033[92m"  # this is bold/bright green on Linux but orange on my Mac
 ANSI_YELLOW: str = "\033[93m"
-ANSI_CYAN: str   = "\033[94m"  # this is blue on Linux but cyan on my Mac
-ANSI_RESET: str  = "\033[0m"
+ANSI_CYAN:   str = "\033[94m"  # this is blue on Linux but cyan on my Mac
+ANSI_RESET:  str = "\033[0m"
 
 # All the formatting rules to ignore when running flake8 to check Python formatting.
 IGNORED_CODES: list[str] = [
@@ -335,13 +335,13 @@ class MaxLevelFilter(logging.Filter):
         return record.levelno <= self.max_level
 
 
-def fallback_logging_config(log_level: int | str = 'INFO', rawlog: bool = False) -> None:
+def fallback_logging_config(log_level: int | str = logging.INFO, rawlog: bool = False) -> None:
     """
     Configure the root logger with a basic configuration if no handlers are set.
     Run this at the start of functions which might be run without first configuring logging.
 
     Args:
-        level  : The logging level to set. Defaults to 'INFO'.
+        level  : The logging level to set. Defaults to logging.INFO.
         rawlog : If True, use a simple log format without timestamps or levels.
     """
     if not logging.getLogger().handlers:
@@ -353,7 +353,7 @@ def fallback_logging_config(log_level: int | str = 'INFO', rawlog: bool = False)
             logging.basicConfig(level=log_level, format="%(message)s")
 
 
-def configure_logging(basename: str, log_level: int | str = 'INFO',
+def configure_logging(basename: str, log_level: int | str = logging.INFO,
                       rawlog: bool = False, logdir: str | os.PathLike[str] = '') -> MemoryHandler:
     """Configure logging to write to files and stdout/stderr, and return a MemoryHandler to capture ERROR logs for later (duplicate) printing."""
     import datetime as dt
@@ -471,7 +471,7 @@ def my_popen(command_list: list, suppress_info: bool = False,
     """Execute a command using subprocess.Popen and capture the output line by line using threads."""
     import threading
     import subprocess
-    fallback_logging_config(log_level='INFO' if not suppress_info else 'ERROR')
+    fallback_logging_config(log_level=logging.INFO if not suppress_info else logging.ERROR)
     command_list_str = [str(item) for item in command_list]
     the_statement = "Executing command: " + ' '.join(command_list_str)
 
@@ -556,7 +556,8 @@ def my_fopen(file_path: str | os.PathLike[str], suppress_errors: bool = False,
         FileNotFoundError:  If the file does not exist.
         UnicodeDecodeError: If the file cannot be read with any of the specified encodings.
     """
-    fallback_logging_config(log_level='INFO' if not suppress_errors else 'CRITICAL')
+    fallback_logging_config(log_level=logging.INFO if not suppress_errors else logging.CRITICAL,
+                            rawlog=rawlog)
     file_path = Path(file_path).expanduser().resolve()
     if not file_path.exists():
         this_message = f"File does not exist: {file_path}"
@@ -1004,12 +1005,14 @@ def ensure_path_is_a_file(path: str | os.PathLike[str]) -> Path:
 
 
 def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
-                  chunk_size: int = 1 << 20, timeout: int = 30) -> None:
+                  chunk_size: int = 1 << 20, timeout: int = 30,
+                  headers: dict[str, str] | None = None) -> None:
     """
     Download a file to 'dest' with retry + exponential backoff.
     Writes to a temporary .part file and renames atomically on success.
     Verifies Content-Length if provided.
     Logs progress by bytes (rough).
+    Also checks free disk space (if size is known) before downloading.
 
     Args:
         url:        The source URL to download from.
@@ -1017,20 +1020,64 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
         retries:    Number of attempts (default 5 is a good balance for transient errors).
         chunk_size: Bytes per read chunk (default 1MiB).
         timeout:    Per-attempt socket timeout (seconds).
+        headers:    Optional dict of HTTP headers to include in the request.
 
     Returns:
         None. Writes the file to 'dest'.
-    
+
     Raises:
-        SystemExit on failure after retries.
+        SystemExit on failure after retries or if insufficient free space is detected.
     """
     import time
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
+    import socket
+
     fallback_logging_config()
     dest = Path(dest).resolve()
     dest.parent.mkdir(parents=True, exist_ok=True)
     temp = dest.with_suffix(dest.suffix + ".part")
+
+    base_headers = {"Accept-Encoding" : "identity",
+                    "User-Agent"      : "python-download/1.0",}
+    eff_headers  = {**base_headers, **(headers or {})}
+
+    succeeded = False  # Track if download succeeded
+
+    # Remove any stale partial to avoid skewing free-space checks.
+    try:
+        if temp.exists():
+            temp.unlink()
+    except OSError:
+        # If we can't remove it, we'll truncate on open later; free-space check may be conservative.
+        pass
+
+    # Pre-flight: attempt to learn expected size and check free space.
+    expected: int | None = None
+    try:
+        req_head = Request(url, headers=eff_headers, method="HEAD")
+        with urlopen(req_head, timeout=timeout) as r:
+            cl = r.headers.get("Content-Length")
+            if cl:
+                try:
+                    expected = int(cl.strip())
+                except ValueError:
+                    expected = None
+    except Exception as e:
+        logging.debug("HEAD probe failed (%s); proceeding without pre-known size.", e)
+
+    if expected is not None:
+        # Skip re-download if size matches on disk already.
+        if dest.exists():
+            try:
+                if dest.stat().st_size == expected:
+                    logging.info("File already present with expected size; skipping: %s", dest)
+                    return
+            except OSError:
+                pass
+        free_bytes = query_free_space(dest)
+        if free_bytes < expected:
+            raise SystemExit(f"Not enough disk space: need {human_bytesize(expected)}, have {human_bytesize(free_bytes)}")
 
     backoff = 1.0
     last_err: Exception | None = None
@@ -1038,13 +1085,26 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
     for attempt in range(1, max(1, retries) + 1):
         try:
             logging.info("Downloading %s → %s (attempt %d/%d)", url, dest, attempt, retries)
-            req = Request(url, headers={"User-Agent": "kokoro-downloader/1.0"})
+            req = Request(url, headers=eff_headers)
             with urlopen(req, timeout=timeout) as resp:
                 total = resp.headers.get("Content-Length")
-                total_i = int(total) if total and total.isdigit() else None
+                total_i = None
+                if total:
+                    try:
+                        total_i = int(total.strip())
+                    except ValueError:
+                        pass
+                # Re-check space at the moment of download if size is known.
+                if total_i is not None:
+                    free_bytes = query_free_space(dest)
+                    if free_bytes < total_i:
+                        raise SystemExit(
+                            f"Not enough disk space: need {human_bytesize(total_i)}, have {human_bytesize(free_bytes)}"
+                        )
 
                 with temp.open("wb") as f:
                     downloaded = 0
+                    last_bucket = -1
                     while True:
                         chunk = resp.read(chunk_size)
                         if not chunk:
@@ -1054,19 +1114,24 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
                         if total_i:
                             # Lightweight textual progress (kept minimal for logging)
                             pct = int(downloaded * 100 / total_i)
-                            if pct % 10 == 0:  # log every ~10%
-                                logging.debug("… %d%% (%d/%d bytes)", pct, downloaded, total_i)
+                            bucket = pct // 10
+                            # Log just once every ~10% but not at 0%
+                            if pct and pct % 10 == 0 and bucket != last_bucket:
+                                logging.debug("… %d%% (%s out of %s)", pct, human_bytesize(downloaded), human_bytesize(total_i))
+                                last_bucket = bucket
+                    f.flush()
+                    os.fsync(f.fileno())
 
             # Verify size if Content-Length available
             if total_i is not None:
                 actual = temp.stat().st_size
                 if actual != total_i:
                     raise IOError(f"Incomplete download: expected {total_i} bytes, got {actual} bytes")
-
             temp.replace(dest)
-            logging.info("Saved %s (%s bytes)", dest, dest.stat().st_size)
+            logging.info("Saved %s (%s)", dest, human_bytesize(dest.stat().st_size))
+            succeeded = True
             return
-        except (HTTPError, URLError, TimeoutError, IOError) as e:
+        except (HTTPError, URLError, socket.timeout, TimeoutError, IOError) as e:
             last_err = e
             logging.warning("Download failed (%s).", e)
             if attempt >= retries:
@@ -1080,6 +1145,12 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
             last_err = e
             logging.exception("Unexpected error during download.")
             break
+        finally:
+            try:
+                if not succeeded and temp.exists():
+                    temp.unlink()
+            except OSError:
+                pass
 
     raise SystemExit(f"Failed to download {url} after {retries} attempts. Last error: {last_err}")
 
@@ -2023,7 +2094,14 @@ def _coerce_log_mode(value: Any) -> int:
         except ValueError:
             pass
         # Handle level names like "INFO", "debug", etc. (case-insensitive)
-        lvl = logging.getLevelName(s.upper())
+        value_map = {'INFO'    : logging.INFO,
+                    'DEBUG'    : logging.DEBUG,
+                    'WARNING'  : logging.WARNING,
+                    'WARN'     : logging.WARNING,
+                    'ERROR'    : logging.ERROR,
+                    'CRITICAL' : logging.CRITICAL}
+        lvl = value_map.get(s.upper())
+        # lvl = logging.getLevelName(s.upper())  # deprecated
         if isinstance(lvl, int):
             return lvl
     logging.warning(f"Unrecognized log_mode {value!r}; defaulting to INFO")
@@ -2671,7 +2749,8 @@ def check_python_formatting(path: str | os.PathLike[str], diff_choice: int = 1) 
     return True
 
 
-def run_flake8(path: str | os.PathLike[str], ignore_codes: list[str] = [], max_line_length: int = 100) -> flake8.Report:
+def run_flake8(path: str | os.PathLike[str], ignore_codes: list[str] = [],
+               max_line_length: int = 100) -> flake8.Report:
     """
     Run Flake8 on 'path', but:
       - only flag E501 if a line exceeds 'max_line_length',
@@ -2740,7 +2819,8 @@ def run_flake8(path: str | os.PathLike[str], ignore_codes: list[str] = [], max_l
     return report
 
 
-def _gather_flake8_issues(path: str | os.PathLike[str], ignore_codes: list[str] = [], max_line_length: int = 100) -> dict[str, str]:
+def _gather_flake8_issues(path: str | os.PathLike[str], ignore_codes: list[str] = [],
+                          max_line_length: int = 100) -> dict[str, str]:
     """
     Returns a dict mapping each Flake8 error code to its first-seen description
     in the file at 'path'.
@@ -2753,7 +2833,8 @@ def _gather_flake8_issues(path: str | os.PathLike[str], ignore_codes: list[str] 
         return _gather_via_app(path, max_line_length, ignore_codes)
 
 
-def _gather_via_cli(path: str | os.PathLike[str], max_line_length: int, ignore_codes: list[str]) -> dict[str, str]:
+def _gather_via_cli(path: str | os.PathLike[str], max_line_length: int,
+                    ignore_codes: list[str]) -> dict[str, str]:
     """Use the flake8 CLI to gather codes and descriptions."""
     import subprocess
     path = ensure_path_is_a_file(path)
@@ -3161,7 +3242,8 @@ def diff_and_confirm(orig_text: str, changed_text: str, path: str | os.PathLike[
     return True
 
 
-def ask_and_autopep8(path: str | os.PathLike[str], code: str, description: str = "", diff_choice: int = 1,
+def ask_and_autopep8(path: str | os.PathLike[str], code: str,
+                     description: str = "", diff_choice: int = 1,
                      changed_color: str = ANSI_CYAN, deleted_color: str = ANSI_RED,
                      added_color: str = ANSI_YELLOW) -> bool:
     """
@@ -3365,8 +3447,10 @@ def multireplace(options: Options) -> None:
     logging.info("Done.")
 
 
-def interactive_flake8(path: str | os.PathLike[str], diff_choice: int = 1, ignore_codes: list[str] = [], max_line_length: int = 100,
-                       changed_color: str = ANSI_CYAN, deleted_color: str = ANSI_RED, added_color: str = ANSI_YELLOW) -> None:
+def interactive_flake8(path: str | os.PathLike[str], diff_choice: int = 1,
+                       ignore_codes: list[str] = [], max_line_length: int = 100,
+                       changed_color: str = ANSI_CYAN, deleted_color: str = ANSI_RED,
+                       added_color: str = ANSI_YELLOW) -> None:
     """
     1) Run the flake8 API for summary counts.
     2) Shell out to flake8 CLI once to harvest one description per code.
@@ -3374,7 +3458,9 @@ def interactive_flake8(path: str | os.PathLike[str], diff_choice: int = 1, ignor
 
     Args:
         path:            Path to the Python file to check.
-        diff_choice:     How many context lines to show in the diff (0 = old-style diff, 1 = unified diff with 0 context lines, 2+ = unified diff with 'diff_choice - 1' context lines).
+        diff_choice:     How many context lines to show in the diff (0 = old-style diff,
+                         1  = unified diff with 0 context lines,
+                         2+ = unified diff with 'diff_choice - 1' context lines).
         ignore_codes:    List of Flake8 codes to ignore (default: empty list).
         max_line_length: Maximum line length for E501 (default: 100).
         changed_color:   Color for unchanged characters in changed lines (default: ANSI_CYAN).
@@ -3697,6 +3783,21 @@ os.makedirs(os.environ['XDG_CACHE_HOME'],           exist_ok=True)
 sys.dont_write_bytecode = True  # Avoid writing .pyc into read-only code dir
 '''
 
+SETUP_CARTOPY_SCRIPT: str = '''import os
+import matplotlib.pyplot as plt
+import cartopy
+cartopy.config['data_dir'] = os.getenv('CARTOPY_DATA_DIR', cartopy.config.get('data_dir'))
+
+fig, ax = plt.subplots(subplot_kw={'projection': cartopy.crs.PlateCarree()})
+ax.coastlines('110m')    # Explicitly specify resolution to ensure pre-loading
+ax.add_feature(cartopy.feature.OCEAN)  # Example color; adjust as needed
+ax.add_feature(cartopy.feature.LAND)   # Example color; adjust as needed
+
+# Force feature download
+plt.savefig('cartopy_test_map.png')
+os.remove('cartopy_test_map.png')
+'''
+
 
 def verify_script(thepath: str | os.PathLike[str], thescript: str) -> None:
     """
@@ -3952,21 +4053,26 @@ def treeview_new_files(directory:      str | os.PathLike[str],
     Args:
         directory:      The directory to scan.
         last_file_path: The optional path to a chosen file. Only files newer than this will be printed.
-        last_mtime:     The modification time of the last_file_path. If None, all files will be considered.
-        maxlines:       The maximum number of lines to read from each file. 0 means don't read at all, -1 means read all lines, otherwise read up to maxlines (default 0).
+        last_mtime:     The modification time of the last_file_path. If None, all files will be
+                        considered.
+        maxlines:       The maximum number of lines to read from each file. 0 means don't read at all,
+                        -1 means read all lines, otherwise read up to maxlines (default 0).
         use_colors:     Whether to use ANSI color codes in the output (default True).
         print_root:     If True, print the root directory name (default True).
         prefix:         The prefix to use for logging output (default '').
         is_last:        Whether this is the last item in the current level (default True).
         level:          The current recursion level (default 0).
         state:          A dictionary to maintain state across recursive calls (default None).
-        probe_only:     If True, do not print file contents, just check for existence of relevant files (default False).
+        probe_only:     If True, do not print file contents, just check for existence of relevant
+                        files (default False).
 
     Returns:
-        bool: True if any relevant files are found or the directory itself is newer than last_mtime, False otherwise.
+        bool: True if any relevant files are found or the directory itself is newer than last_mtime,
+              False otherwise.
 
     Raises:
-        None: Catches exceptions, logs an error and returns False if the directory is not a valid directory or does not exist.
+        None: Catches exceptions, logs an error and returns False if the directory is not a valid
+              directory or does not exist.
     """
     import datetime as dt
     fallback_logging_config(rawlog=True)
@@ -4136,7 +4242,15 @@ def treeview_new_files(directory:      str | os.PathLike[str],
 
 
 def check_if_command_exists(command: str) -> bool:
-    """Check if a command exists on the system."""
+    """
+    Check if a command exists on the system.
+    
+    Args:
+        command: The command to check.
+    
+    Returns:
+        bool: True if the command exists, False otherwise.
+    """
     import subprocess
     return subprocess.run(['which', command], capture_output=True).returncode == 0
 
@@ -4300,14 +4414,22 @@ def detect_country(force_wtfismyip: bool = False) -> str | None:
             dct = json.loads(result.stdout)
             thecountryname = dct.get('country', '')
             logging.debug(f"Detected country from curl: {thecountryname}")
-        except Exception as e:
-            logging.warning(f"IPinfo exception:\n{e}\nFalling back to using wtfismyip.com.")
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+            logging.warning("IPinfo exception: %s\nFalling back to wtfismyip.com.", e)
 
     if not thecountryname:
-        public_json = requests.get("http://wtfismyip.com/json", verify=False).text
-        dct = json.loads(public_json)
-        thecountryname = dct['YourFuckingCountry']
-        logging.debug(f"Detailed results:\n{dct}")
+        try:
+            resp = requests.get("https://wtfismyip.com/json", timeout=5)
+            resp.raise_for_status()
+            dct = resp.json()
+            thecountryname = dct.get("YourFuckingCountry", "")
+            logging.debug("Detailed results: %s", dct)
+        except requests.exceptions.RequestException as e:
+            logging.error("Country detection failed (network error): %s", e)
+            return None
+        except (ValueError, KeyError) as e:
+            logging.error("Country detection failed (bad response): %s", e)
+            return None
 
     return thecountryname.strip() if thecountryname else None
 
