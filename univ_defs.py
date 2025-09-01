@@ -342,10 +342,6 @@ def fallback_logging_config(log_level: int | str = logging.INFO, rawlog: bool = 
         level  : The logging level to set. Defaults to logging.INFO.
         rawlog : If True, use a simple log format without timestamps or levels.
     """
-    root = logging.getLogger()
-    for h in root.handlers:
-        print(h, h.level, getattr(h.formatter, "_fmt", None))
-
     if not logging.getLogger().handlers:
         if not rawlog:  # Use a full logging format with timestamps and levels.
             logging.basicConfig(level=log_level,
