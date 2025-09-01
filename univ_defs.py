@@ -204,27 +204,45 @@ def return_method_name(levels_up: int = 1) -> str:
 
 
 class LLMs:
-    """Class that handles the import and operation of large language model APIs."""
+    """Class that handles the import and operation of large language model APIs.
+       Supports LiteLLM when `self.use_litellm` is True (set in subclass)."""
 
     def __init__(self) -> None:
-        """Initialize the LLM class and import the necessary modules."""
+        # Feature flags / runtime knobs (subclass may override after super().__init__())
+        self.use_litellm:        bool = False  # Toggle LiteLLM on/off
+        self.ollama_base_url:     str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        self._litellm_ready:     bool = False
+        self._litellm_mod: Any | None = None
+
+        # Legacy vendor wiring stays intact for backwards compatibility.
         self.init_llms()
+
+    def _ensure_litellm(self) -> None:
+        if self._litellm_ready:
+            return
+        try:
+            import litellm  # type: ignore
+            self._litellm_mod = litellm
+            # Don’t set global api_base here; pass per-request to avoid side effects.
+            self._litellm_ready = True
+        except ImportError as e:
+            my_critical_error(f"LiteLLM is enabled but not installed. `pip install litellm` Error: {e}")
 
     def init_llms(self) -> None:
         """
-        1. Import the LLM APIs into the self.llm_modules dictionary.
-        2. Check if the necessary environment variables are set.
-        3. Create clients for all successfully imported LLMs.
+        Legacy path:
+        1) Import vendor SDKs into self.llm_modules
+        2) Check required env vars
+        3) Create clients
         """
         from types import ModuleType
-        # 1. Import the LLM APIs into the self.llm_modules dictionary.
-        # ADD NEW COMPANY LLMs HERE.
         self.llms: list[dict[str, str]] = [
             {"name": "OpenAI",    "module": "openai",    "env_var": "OPENAI_API_KEY"},
             {"name": "Anthropic", "module": "anthropic", "env_var": "ANTHROPIC_API_KEY"},
         ]
-        self.found_llms:  dict[str,       bool] = {}
-        self.llm_modules: dict[str, ModuleType] = {}
+        self.found_llms:  dict[str, bool]          = {}
+        self.llm_modules: dict[str, ModuleType]    = {}
+
         for llm in self.llms:
             this_llm = llm["name"]
             this_key = llm["env_var"]
@@ -235,15 +253,15 @@ class LLMs:
                 # self.llm_modules[this_llm] = __import__(llm["module"])
                 # ADD NEW COMPANY LLMs HERE.
                 if  this_llm == "OpenAI":
-                    import openai
+                    import openai  # type: ignore
                     self.llm_modules[this_llm] = openai
                 elif this_llm == "Anthropic":
-                    import anthropic
+                    import anthropic  # type: ignore
                     self.llm_modules[this_llm] = anthropic
                 else:
                     my_critical_error(f"Unknown LLM: {this_llm}")
+
                 print(f"{this_llm} package found", end="")
-                # 2. Check if the necessary environment variables are set.
                 if this_key in os.environ:
                     self.found_llms[this_llm] = True
                     print(f", and the {this_key} environment variable is set.")
@@ -255,13 +273,15 @@ class LLMs:
                 print(f"{this_llm} package not found, so it cannot be used. Error: {e}")
 
         if not any(self.found_llms.values()):
-            my_critical_error(f"Could not find any large language model APIs. Choices are: {', '.join(self.found_llms.keys())}\nExiting.")
+            # We still allow LiteLLM-only usage later, so don’t hard-exit if use_litellm is True.
+            # Exit only if LiteLLM is *not* in use and no legacy vendor is available.
+            if not getattr(self, "use_litellm", False):
+                my_critical_error(f"Could not find any large language model APIs. Choices are: {', '.join(self.found_llms.keys())}\nExiting.")
 
-        # 3. Create clients for all successfully imported LLMs.
+        # 3. Create legacy clients
         self.clients: dict[str, Any] = {}
         for llm in self.found_llms:
             if self.found_llms[llm]:
-                # ADD NEW COMPANY LLMs HERE.
                 if   llm == "OpenAI":
                     self.clients[llm] = self.llm_modules[llm].OpenAI()
                 elif llm == "Anthropic":
@@ -270,11 +290,56 @@ class LLMs:
                     print(f"Can't create client for unknown LLM: {llm}")
                     sys.exit()
 
+    # --- Utility: normalize content extraction for LiteLLM responses ---
+    @staticmethod
+    def _extract_text_from_openai_like(resp: Any) -> str:
+        # Works for dict or object forms
+        try:
+            # object style
+            return resp.choices[0].message["content"]  # type: ignore[index]
+        except Exception:
+            pass
+        try:
+            # pydantic-like / attribute
+            return resp.choices[0].message.content  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            # dict style
+            return resp["choices"][0]["message"]["content"]  # type: ignore[index]
+        except Exception:
+            pass
+        return str(resp)
+
     def send_prompt(self, prompt: str, system_message: str,
                     model: str, company: str, temperature: float,
                     max_tokens: int = 1000) -> str:
-        """Call the chosen LLM's API and return the text response."""
-        # ADD NEW COMPANY LLMs HERE.
+        """Call the chosen LLM and return text. If self.use_litellm is True,
+           route via LiteLLM; else use legacy per-vendor clients."""
+        if getattr(self, "use_litellm", False):
+            self._ensure_litellm()
+            litellm = self._litellm_mod  # type: ignore
+
+            # Per-request extras (esp. for Ollama)
+            extra: dict[str, Any] = {}
+            # Lightweight heuristic: any model starting with "ollama/" is local via Ollama
+            if model.startswith("ollama/"):
+                extra["api_base"] = getattr(self, "ollama_base_url", "http://localhost:11434")
+
+            # OpenAI-compatible chat call
+            resp = litellm.completion(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user",   "content": prompt},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **extra
+            )
+            return self._extract_text_from_openai_like(resp)
+
+        # --- Legacy vendor paths preserved as before ---
         if company == "OpenAI":
             response_obj = self.clients[company].chat.completions.create(
                 model=model,
@@ -294,6 +359,99 @@ class LLMs:
             return response_obj.content[0].text
         else:
             my_critical_error(f"Unknown company: {company}")
+
+
+# class LLMs:
+#     """Class that handles the import and operation of large language model APIs."""
+
+#     def __init__(self) -> None:
+#         """Initialize the LLM class and import the necessary modules."""
+#         self.init_llms()
+
+#     def init_llms(self) -> None:
+#         """
+#         1. Import the LLM APIs into the self.llm_modules dictionary.
+#         2. Check if the necessary environment variables are set.
+#         3. Create clients for all successfully imported LLMs.
+#         """
+#         from types import ModuleType
+#         # 1. Import the LLM APIs into the self.llm_modules dictionary.
+#         # ADD NEW COMPANY LLMs HERE.
+#         self.llms: list[dict[str, str]] = [
+#             {"name": "OpenAI",    "module": "openai",    "env_var": "OPENAI_API_KEY"},
+#             {"name": "Anthropic", "module": "anthropic", "env_var": "ANTHROPIC_API_KEY"},
+#         ]
+#         self.found_llms:  dict[str,       bool] = {}
+#         self.llm_modules: dict[str, ModuleType] = {}
+#         for llm in self.llms:
+#             this_llm = llm["name"]
+#             this_key = llm["env_var"]
+#             try:
+#                 # THIS DOESN'T WORK YET BECAUSE DYNAMIC IMPORTS BREAK mypy.py!
+#                 # ALSO, THE importlib APPROACH IS MORE MODERN THAN THE __import__ APPROACH:
+#                 # https://chatgpt.com/share/68158ef6-b5ec-8006-ab89-15340479e6d2
+#                 # self.llm_modules[this_llm] = __import__(llm["module"])
+#                 # ADD NEW COMPANY LLMs HERE.
+#                 if  this_llm == "OpenAI":
+#                     import openai
+#                     self.llm_modules[this_llm] = openai
+#                 elif this_llm == "Anthropic":
+#                     import anthropic
+#                     self.llm_modules[this_llm] = anthropic
+#                 else:
+#                     my_critical_error(f"Unknown LLM: {this_llm}")
+#                 print(f"{this_llm} package found", end="")
+#                 # 2. Check if the necessary environment variables are set.
+#                 if this_key in os.environ:
+#                     self.found_llms[this_llm] = True
+#                     print(f", and the {this_key} environment variable is set.")
+#                 else:
+#                     self.found_llms[this_llm] = False
+#                     print(f", but the {this_key} environment variable is not set, so the {this_llm} package cannot be used.")
+#             except ImportError as e:
+#                 self.found_llms[this_llm] = False
+#                 print(f"{this_llm} package not found, so it cannot be used. Error: {e}")
+
+#         if not any(self.found_llms.values()):
+#             my_critical_error(f"Could not find any large language model APIs. Choices are: {', '.join(self.found_llms.keys())}\nExiting.")
+
+#         # 3. Create clients for all successfully imported LLMs.
+#         self.clients: dict[str, Any] = {}
+#         for llm in self.found_llms:
+#             if self.found_llms[llm]:
+#                 # ADD NEW COMPANY LLMs HERE.
+#                 if   llm == "OpenAI":
+#                     self.clients[llm] = self.llm_modules[llm].OpenAI()
+#                 elif llm == "Anthropic":
+#                     self.clients[llm] = self.llm_modules[llm].Anthropic()
+#                 else:
+#                     print(f"Can't create client for unknown LLM: {llm}")
+#                     sys.exit()
+
+#     def send_prompt(self, prompt: str, system_message: str,
+#                     model: str, company: str, temperature: float,
+#                     max_tokens: int = 1000) -> str:
+#         """Call the chosen LLM's API and return the text response."""
+#         # ADD NEW COMPANY LLMs HERE.
+#         if company == "OpenAI":
+#             response_obj = self.clients[company].chat.completions.create(
+#                 model=model,
+#                 temperature=temperature,
+#                 messages=[{"role": "system", "content": system_message},
+#                           {"role": "user",   "content": prompt}]
+#             )
+#             return response_obj.choices[0].message.content
+#         elif company == "Anthropic":
+#             response_obj = self.clients[company].messages.create(
+#                 model=model,
+#                 max_tokens=max_tokens,
+#                 temperature=temperature,
+#                 system=system_message,
+#                 messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+#             )
+#             return response_obj.content[0].text
+#         else:
+#             my_critical_error(f"Unknown company: {company}")
 
 
 class MemoryHandler(logging.Handler):
