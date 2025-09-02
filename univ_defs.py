@@ -3,20 +3,25 @@
 # Written by Emmy Killett (she/her), ChatGPT 4o (it/its), ChatGPT o1-preview (it/its), ChatGPT o3-mini-high (it/its), ChatGPT o4-mini-high (it/its), ChatGPT 5 (it/its), and GitHub Copilot (it/its).
 from __future__ import annotations  # For Python 3.7+ compatibility with type annotations
 import os
-from pathlib import Path  # Preferred over os.path for path manipulations.
 import sys
+from pathlib import Path  # Preferred over os.path for path manipulations.
 import logging
-from typing import TextIO, Any, TypeAlias, Type, Literal
-from collections.abc import Iterator
+from types import ModuleType
+from collections.abc import Iterator, Sequence
+from typing import TextIO, Any, TypeAlias, Type, Literal, Protocol
 import re  # Used to precompile regexes for performance
+from dataclasses import dataclass, field, replace
+from enum import Enum
 
-# This is the version of univ_defs.py
+# Version of univ_defs.py:
 __version__: str = '0.1.7'
 
-# This is the version of python which should be used in scripts that import this module.
-PY_VERSION: float = 3.11
+# Version of python which should be used in scripts that import this module.
+# Python 3.12 is supported until 2028-10. Schedule PEP 693. https://devguide.python.org/versions/
+PY_VERSION: float = 3.12
 
-DEFAULT_ENCODING: str = 'utf-8'  # This is the default encoding used for reading and writing text files.
+# Default encoding used for reading and writing text files:
+DEFAULT_ENCODING: str = 'utf-8'
 
 # ANSI escape codes
 ANSI_RED:    str = "\033[91m"
@@ -203,56 +208,191 @@ def return_method_name(levels_up: int = 1) -> str:
     return name
 
 
+class SelectionStrategy(str, Enum):
+    """Enumeration of selection strategies for model selection."""
+    CHEAPEST:               str = "cheapest"
+    CONTEXT_THEN_PRICE:     str = "context_then_price"
+    PERFORMANCE_THEN_PRICE: str = "performance_then_price"
+
+
+@dataclass
+class LLMConfig:
+    """Configuration for LLM selection and usage. Data only."""
+    # Routing / engines
+    use_litellm: bool = True
+    allow_local_models: bool = True
+    use_local_model:    bool = False
+    local_model_name:    str = "qwen2.5-coder:1.5b-base"
+    ollama_base_url:     str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+    # Selection knobs
+    selection_strategy: SelectionStrategy | str = SelectionStrategy.CHEAPEST
+    min_context_tokens:    int = 0
+    assumed_prompt_tokens: int = 1000
+    assumed_output_tokens: int = 1000
+
+    # Candidates + scoring
+    candidate_models:    list[str] = field(default_factory=list)    # if empty -> _default_candidate_models()
+    model_scores: dict[str, float] = field(default_factory=dict) # if empty -> _default_model_scores() (+env JSON merge)
+
+    # Back-compat defaults (filled after selection)
+    default_model:   str = "gpt-3.5-turbo"
+    default_company: str = "OpenAI"
+
+    # Optional: commonly-used knobs some programs keep near config
+    default_temperature: float = 0.0
+    max_tokens:            int = 1000
+
+
+# ---------------------------
+# Candidate model metadata
+# ---------------------------
+@dataclass
+class ModelInfo:
+    name:                    str
+    provider:                str         # e.g., "OpenAI", "Anthropic", "Ollama"
+    context_window:          int         # tokens
+    input_cost_per_token:  float         # $/token (normalized)
+    output_cost_per_token: float         # $/token (normalized)
+    is_local:               bool         # True for Ollama or similar
+    available:              bool         # env/api key/endpoint reachable (best effort)
+    performance_score:     float = 0.5   # your objective score if any (higher better)
+    meta:         dict[str, Any] = field(default_factory=dict)
+
+    def estimate_cost(self, tokens_in: int, tokens_out: int) -> float:
+        return self.input_cost_per_token * tokens_in + self.output_cost_per_token * tokens_out
+
+
+# ---------------------------
+# Context passed to strategies
+# ---------------------------
+@dataclass
+class SelectionContext:
+    tokens_in:          int
+    tokens_out:         int
+    min_context_tokens: int
+    require_local:     bool = False
+    extras:  dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------
+# Strategy interface
+# ---------------------------
+class StrategyFn(Protocol):
+    def __call__(self, candidates: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo: ...
+
+
+# ==========================================================
+# LLMs class: public API + hooks
+# ==========================================================
 class LLMs:
-    """Class that handles the import and operation of large language model APIs.
-       Supports LiteLLM when `self.use_litellm` is True (set in subclass)."""
+    """
+    - Owns legacy vendor SDK clients (OpenAI/Anthropic)
+    - Optionally routes via LiteLLM
+    - Builds ModelInfo list, filters by availability/context
+    - Applies registered/built-in selection strategy
+    - Exposes stable send_prompt(...)
+    """
 
+    # Default candidates (including local via Ollama)
+    _DEFAULT_CANDIDATES: list[str] = [
+        "gpt-3.5-turbo",
+        "gpt-4o-mini",
+        "gpt-4o",
+        "o1-mini",
+        "claude-3-haiku-20240229",
+        "claude-3-5-sonnet-20241022",
+        # Local models:
+        "ollama/qwen2.5-coder:1.5b-base",
+        "ollama/qwen2.5-coder:3b-base",
+        "ollama/codegemma:2b-code",
+        "ollama/starcoder2:3b",
+        "ollama/granite-code:3b",
+        "ollama/phi3.5:3.8b",
+        "ollama/llama3:8b",
+    ]
+
+    # ---------- defaults used when LiteLLM can't tell us ----------
+    _DEFAULT_CONTEXT: dict[str, int] = {
+        "gpt-3.5-turbo"                  :  16_385,
+        "gpt-4o-mini"                    : 128_000,
+        "gpt-4o"                         : 128_000,
+        "o1-mini"                        : 128_000,
+        "claude-3-haiku-20240229"        : 200_000,
+        "claude-3-5-sonnet-20241022"     : 200_000,
+        # Local models:
+        "ollama/qwen2.5-coder:1.5b-base" :  32_768,
+        "ollama/qwen2.5-coder:3b-base"   :  32_768,
+        "ollama/codegemma:2b-code"       :  16_384,
+        "ollama/starcoder2:3b"           :  16_384,
+        "ollama/granite-code:3b"         : 128_000,  # IBM’s Granite-3B-Code-Instruct-128K
+        "ollama/phi3.5:3.8b"             : 128_000,
+        "ollama/llama3:8b"               :   8_192,
+    }
+
+    # Default performance scores (higher is better)
+    _DEFAULT_MODEL_SCORES: dict[str, float] = {
+        "gpt-4o"                         : 0.95,
+        "gpt-4o-mini"                    : 0.78,
+        "o1-mini"                        : 0.85,
+        "gpt-3.5-turbo"                  : 0.60,
+        "claude-3-5-sonnet-20241022"     : 0.92,
+        "claude-3-haiku-20240229"        : 0.70,
+        # Local models:
+        "ollama/qwen2.5-coder:1.5b-base" : 0.00,
+        "ollama/qwen2.5-coder:3b-base"   : 0.00,
+        "ollama/codegemma:2b-code"       : 0.00,
+        "ollama/starcoder2:3b"           : 0.00,
+        "ollama/granite-code:3b"         : 0.00,  # IBM’s Granite-3B-Code-Instruct-128K
+        "ollama/phi3.5:3.8b"             : 0.00,
+        "ollama/llama3:8b"               : 0.55,
+    }
+
+    # Provider -> required env var
+    _PROVIDER_ENV: dict[str, str] = {
+        "OpenAI"    : "OPENAI_API_KEY",
+        "Anthropic" : "ANTHROPIC_API_KEY",
+        # Ollama/local: no key needed
+    }
+
+    # ---------- public lifecycle ----------
     def __init__(self) -> None:
-        # Feature flags / runtime knobs (subclass may override after super().__init__())
-        self.use_litellm:        bool = False  # Toggle LiteLLM on/off
-        self.ollama_base_url:     str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        self._litellm_ready:     bool = False
-        self._litellm_mod: Any | None = None
-
-        # Legacy vendor wiring stays intact for backwards compatibility.
-        self.init_llms()
-
-    def _ensure_litellm(self) -> None:
-        if self._litellm_ready:
-            return
-        try:
-            import litellm  # type: ignore
-            self._litellm_mod = litellm
-            # Don’t set global api_base here; pass per-request to avoid side effects.
-            self._litellm_ready = True
-        except ImportError as e:
-            my_critical_error(f"LiteLLM is enabled but not installed. `pip install litellm` Error: {e}")
-
-    def init_llms(self) -> None:
         """
-        Legacy path:
-        1) Import vendor SDKs into self.llm_modules
-        2) Check required env vars
-        3) Create clients
+        Initialize legacy vendors immediately (keeps backward compat).
+        LiteLLM is lazy-initialized when/if config.use_litellm is True.
         """
-        from types import ModuleType
         self.llms: list[dict[str, str]] = [
             {"name": "OpenAI",    "module": "openai",    "env_var": "OPENAI_API_KEY"},
             {"name": "Anthropic", "module": "anthropic", "env_var": "ANTHROPIC_API_KEY"},
         ]
-        self.found_llms:  dict[str, bool]          = {}
-        self.llm_modules: dict[str, ModuleType]    = {}
+        self.found_llms:                         dict[str, bool] = {}
+        self.llm_modules:                  dict[str, ModuleType] = {}
+        self.clients:                             dict[str, Any] = {}
 
+        self._config:                           LLMConfig | None = None
+        self._selected:                         ModelInfo | None = None
+        self._candidates_after_filter:           list[ModelInfo] = []
+        self._strategies:                  dict[str, StrategyFn] = {}
+        self._pricing_cache: dict[str, tuple[float, float, int]] = {}
+        self._litellm_ready:                                bool = False
+        self._litellm_mod:                            Any | None = None
+        self._legacy_available:                             bool = False
+
+        self._register_builtin_strategies()
+        self.init_llms()  # sets up legacy clients
+
+        # Keep public fields for back-compat with existing call sites.
+        self.model:   str = "gpt-3.5-turbo"
+        self.company: str = "OpenAI"
+
+    # ---------- vendor discovery (legacy) ----------
+    def init_llms(self) -> None:
+        """Discover legacy vendor SDKs + clients."""
         for llm in self.llms:
             this_llm = llm["name"]
             this_key = llm["env_var"]
             try:
-                # THIS DOESN'T WORK YET BECAUSE DYNAMIC IMPORTS BREAK mypy.py!
-                # ALSO, THE importlib APPROACH IS MORE MODERN THAN THE __import__ APPROACH:
-                # https://chatgpt.com/share/68158ef6-b5ec-8006-ab89-15340479e6d2
-                # self.llm_modules[this_llm] = __import__(llm["module"])
-                # ADD NEW COMPANY LLMs HERE.
-                if  this_llm == "OpenAI":
+                if this_llm == "OpenAI":
                     import openai  # type: ignore
                     self.llm_modules[this_llm] = openai
                 elif this_llm == "Anthropic":
@@ -261,95 +401,210 @@ class LLMs:
                 else:
                     my_critical_error(f"Unknown LLM: {this_llm}")
 
-                print(f"{this_llm} package found", end="")
+                msg = f"{this_llm} package found"
                 if this_key in os.environ:
                     self.found_llms[this_llm] = True
-                    print(f", and the {this_key} environment variable is set.")
+                    msg += f", and the {this_key} environment variable is set."
                 else:
                     self.found_llms[this_llm] = False
-                    print(f", but the {this_key} environment variable is not set, so the {this_llm} package cannot be used.")
+                    msg += f", but the {this_key} environment variable is not set, so the {this_llm} package cannot be used."
+                print(msg)
             except ImportError as e:
                 self.found_llms[this_llm] = False
                 print(f"{this_llm} package not found, so it cannot be used. Error: {e}")
 
-        if not any(self.found_llms.values()):
-            # We still allow LiteLLM-only usage later, so don’t hard-exit if use_litellm is True.
-            # Exit only if LiteLLM is *not* in use and no legacy vendor is available.
-            if not getattr(self, "use_litellm", False):
-                my_critical_error(f"Could not find any large language model APIs. Choices are: {', '.join(self.found_llms.keys())}\nExiting.")
+        # Create legacy clients for available SDKs
+        for llm_name, ok in self.found_llms.items():
+            if not ok:
+                continue
+            if   llm_name == "OpenAI":
+                self.clients[llm_name] = self.llm_modules[llm_name].OpenAI()
+            elif llm_name == "Anthropic":
+                self.clients[llm_name] = self.llm_modules[llm_name].Anthropic()
 
-        # 3. Create legacy clients
-        self.clients: dict[str, Any] = {}
-        for llm in self.found_llms:
-            if self.found_llms[llm]:
-                if   llm == "OpenAI":
-                    self.clients[llm] = self.llm_modules[llm].OpenAI()
-                elif llm == "Anthropic":
-                    self.clients[llm] = self.llm_modules[llm].Anthropic()
-                else:
-                    print(f"Can't create client for unknown LLM: {llm}")
-                    sys.exit()
+        self._legacy_available = any(self.found_llms.values())
 
-    # --- Utility: normalize content extraction for LiteLLM responses ---
-    @staticmethod
-    def _extract_text_from_openai_like(resp: Any) -> str:
-        # Works for dict or object forms
-        try:
-            # object style
-            return resp.choices[0].message["content"]  # type: ignore[index]
-        except Exception:
-            pass
-        try:
-            # pydantic-like / attribute
-            return resp.choices[0].message.content  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        try:
-            # dict style
-            return resp["choices"][0]["message"]["content"]  # type: ignore[index]
-        except Exception:
-            pass
-        return str(resp)
+    # ---------- config application ----------
+    def apply_config(self, config: LLMConfig) -> None:
+        """
+        Store config, hydrate defaults, compute candidates, select a model,
+        then set self.model/self.company for back-compat.
+        """
+        cfg = self._resolve_config(config)
+        self._config = cfg
 
+        # Shortcut: forced local model
+        if cfg.use_local_model:
+            chosen                        = self._build_model_info(cfg.local_model_name, cfg)
+            self._selected                = chosen
+            self._candidates_after_filter = [chosen]
+            self.model                    = chosen.name
+            self.company                  = chosen.provider
+            self._after_selection(self.model, self.company)
+            return
+
+        # Build candidate list with metadata
+        raw_candidates = [self._build_model_info(m, cfg) for m in cfg.candidate_models]
+
+        # Filter by availability & context (and local requirement if present)
+        ctx = SelectionContext(
+            tokens_in=cfg.assumed_prompt_tokens,
+            tokens_out=cfg.assumed_output_tokens,
+            min_context_tokens=cfg.min_context_tokens,
+            require_local=False,  # will be set by forced local path above
+        )
+        filtered, reasons_map = self._filter_candidates(raw_candidates, ctx)
+
+        # If filtering removed everything, fall back to unfiltered list
+        effective_candidates          = filtered if filtered else raw_candidates
+        self._candidates_after_filter = effective_candidates
+
+        # Choose a strategy
+        strategy_name = str(cfg.selection_strategy)
+        strategy_fn   = self._strategies.get(strategy_name)
+        if strategy_fn is None:
+            # default to CHEAPEST
+            strategy_fn = self._strategies[SelectionStrategy.CHEAPEST.value]
+
+        # Select winner
+        winner         = strategy_fn(effective_candidates, ctx)
+        self._selected = winner
+        self.model     = winner.name
+        self.company   = winner.provider
+
+        # Attach filter reasons if requested later
+        for mi in raw_candidates:
+            if mi.name in reasons_map:
+                mi.meta.setdefault("filter_reasons", reasons_map[mi.name])
+
+        self._after_selection(self.model, self.company)
+
+    def refresh_selection(self) -> None:
+        """Re-run selection using the current LLMConfig."""
+        if self._config is None:
+            my_critical_error("refresh_selection() called before apply_config().")
+        self.apply_config(self._config)
+
+    def get_config(self) -> LLMConfig:
+        if self._config is None:
+            # Return a default config if none applied yet.
+            return LLMConfig()
+        return replace(self._config)
+
+    # ---------- strategy registry ----------
+    def register_strategy(self, name: str, fn: StrategyFn) -> None:
+        self._strategies[name] = fn
+
+    def _register_builtin_strategies(self) -> None:
+        def cheapest(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
+            return min(cands, key=lambda m: m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
+
+        def context_then_price(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
+            # cands already filtered by context; cheapest among them
+            return min(cands, key=lambda m: m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
+
+        def performance_then_price(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
+            def key(m: ModelInfo):
+                return (-m.performance_score, m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
+            return min(cands, key=key)
+
+        self._strategies[SelectionStrategy.CHEAPEST.value]               = cheapest
+        self._strategies[SelectionStrategy.CONTEXT_THEN_PRICE.value]     = context_then_price
+        self._strategies[SelectionStrategy.PERFORMANCE_THEN_PRICE.value] = performance_then_price
+
+    # ---------- selection introspection ----------
+    def list_candidates(self, with_reasons: bool = False) -> list[ModelInfo]:
+        """
+        Return the candidate list after filtering (or just the selected if forced local).
+        If with_reasons=True, include 'filter_reasons' in meta where applicable.
+        """
+        res = [replace(mi) for mi in self._candidates_after_filter]
+        if not with_reasons:
+            for mi in res:
+                mi.meta.pop("filter_reasons", None)
+        return res
+
+    def describe_selection(self) -> dict[str, Any]:
+        chosen = self._selected
+        cfg = self._config or LLMConfig()
+        if chosen is None:
+            return {
+                "chosen_model" : None,
+                "provider"     : None,
+                "strategy"     : str(cfg.selection_strategy),
+                "explanation"  : "No selection computed yet. Call apply_config().",
+            }
+        considered = []
+        for mi in self._candidates_after_filter:
+            considered.append({
+                "name"                  : mi.name,
+                "provider"              : mi.provider,
+                "context_window"        : mi.context_window,
+                "input_cost_per_token"  : mi.input_cost_per_token,
+                "output_cost_per_token" : mi.output_cost_per_token,
+                "performance_score"     : mi.performance_score,
+                "estimated_cost"        : mi.estimate_cost(cfg.assumed_prompt_tokens,
+                                                           cfg.assumed_output_tokens),
+                "available"             : mi.available,
+            })
+        return {
+            "chosen_model"   : chosen.name,
+            "provider"       : chosen.provider,
+            "context_window" : chosen.context_window,
+            "estimated_cost" : chosen.estimate_cost(cfg.assumed_prompt_tokens,
+                                                    cfg.assumed_output_tokens),
+            "strategy"       : str(cfg.selection_strategy),
+            "considered"     : considered,
+        }
+
+    # ---------- core send method (stable) ----------
     def send_prompt(self, prompt: str, system_message: str,
                     model: str, company: str, temperature: float,
                     max_tokens: int = 1000) -> str:
-        """Call the chosen LLM and return text. If self.use_litellm is True,
-           route via LiteLLM; else use legacy per-vendor clients."""
-        if getattr(self, "use_litellm", False):
+        """
+        If config.use_litellm: route via LiteLLM (company ignored for transport).
+        Else: use legacy vendor client keyed by 'company'.
+        Returns text content.
+        """
+        cfg = self._config or LLMConfig()
+        if cfg.use_litellm:
             self._ensure_litellm()
             litellm = self._litellm_mod  # type: ignore
 
-            # Per-request extras (esp. for Ollama)
-            extra: dict[str, Any] = {}
-            # Lightweight heuristic: any model starting with "ollama/" is local via Ollama
-            if model.startswith("ollama/"):
-                extra["api_base"] = getattr(self, "ollama_base_url", "http://localhost:11434")
+            extra = self._extra_litellm_args_for(model)
+            try:
+                resp = litellm.completion(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_message},
+                        {"role": "user",   "content": prompt},
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **extra
+                )
+            except Exception as e:
+                my_critical_error(f"LiteLLM request failed for model '{model}': {e}")
 
-            # OpenAI-compatible chat call
-            resp = litellm.completion(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_message},
-                    {"role": "user",   "content": prompt},
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **extra
-            )
             return self._extract_text_from_openai_like(resp)
 
         # --- Legacy vendor paths preserved as before ---
         if company == "OpenAI":
-            response_obj = self.clients[company].chat.completions.create(
+            if "OpenAI" not in self.clients:
+                my_critical_error("OpenAI client not initialized or OPENAI_API_KEY not set.")
+            response_obj = self.clients["OpenAI"].chat.completions.create(
                 model=model,
                 temperature=temperature,
-                messages=[{"role": "system", "content": system_message},
-                          {"role": "user",   "content": prompt}]
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user",   "content": prompt}
+                ]
             )
             return response_obj.choices[0].message.content
         elif company == "Anthropic":
-            response_obj = self.clients[company].messages.create(
+            if "Anthropic" not in self.clients:
+                my_critical_error("Anthropic client not initialized or ANTHROPIC_API_KEY not set.")
+            response_obj = self.clients["Anthropic"].messages.create(
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -359,99 +614,250 @@ class LLMs:
             return response_obj.content[0].text
         else:
             my_critical_error(f"Unknown company: {company}")
+            return ""  # unreachable
 
+    # ====================================================
+    # overridable hooks (tiny, intentional)
+    # ====================================================
+    def _default_candidate_models(self) -> list[str]:
+        """Return a sane default list combining remote + local names."""
+        return list(self._DEFAULT_CANDIDATES)
 
-# class LLMs:
-#     """Class that handles the import and operation of large language model APIs."""
+    def _default_model_scores(self) -> dict[str, float]:
+        """Return default performance scores; caller can merge env/JSON."""
+        return dict(self._DEFAULT_MODEL_SCORES)
 
-#     def __init__(self) -> None:
-#         """Initialize the LLM class and import the necessary modules."""
-#         self.init_llms()
+    def _extra_litellm_args_for(self, model: str) -> dict[str, Any]:
+        """
+        Per-model transport args for LiteLLM (e.g., {'api_base': self.ollama_base_url}
+        for 'ollama/*'). Default returns {}.
+        """
+        cfg = self._config or LLMConfig()
+        if model.startswith("ollama/"):
+            return {"api_base": cfg.ollama_base_url}
+        return {}
 
-#     def init_llms(self) -> None:
-#         """
-#         1. Import the LLM APIs into the self.llm_modules dictionary.
-#         2. Check if the necessary environment variables are set.
-#         3. Create clients for all successfully imported LLMs.
-#         """
-#         from types import ModuleType
-#         # 1. Import the LLM APIs into the self.llm_modules dictionary.
-#         # ADD NEW COMPANY LLMs HERE.
-#         self.llms: list[dict[str, str]] = [
-#             {"name": "OpenAI",    "module": "openai",    "env_var": "OPENAI_API_KEY"},
-#             {"name": "Anthropic", "module": "anthropic", "env_var": "ANTHROPIC_API_KEY"},
-#         ]
-#         self.found_llms:  dict[str,       bool] = {}
-#         self.llm_modules: dict[str, ModuleType] = {}
-#         for llm in self.llms:
-#             this_llm = llm["name"]
-#             this_key = llm["env_var"]
-#             try:
-#                 # THIS DOESN'T WORK YET BECAUSE DYNAMIC IMPORTS BREAK mypy.py!
-#                 # ALSO, THE importlib APPROACH IS MORE MODERN THAN THE __import__ APPROACH:
-#                 # https://chatgpt.com/share/68158ef6-b5ec-8006-ab89-15340479e6d2
-#                 # self.llm_modules[this_llm] = __import__(llm["module"])
-#                 # ADD NEW COMPANY LLMs HERE.
-#                 if  this_llm == "OpenAI":
-#                     import openai
-#                     self.llm_modules[this_llm] = openai
-#                 elif this_llm == "Anthropic":
-#                     import anthropic
-#                     self.llm_modules[this_llm] = anthropic
-#                 else:
-#                     my_critical_error(f"Unknown LLM: {this_llm}")
-#                 print(f"{this_llm} package found", end="")
-#                 # 2. Check if the necessary environment variables are set.
-#                 if this_key in os.environ:
-#                     self.found_llms[this_llm] = True
-#                     print(f", and the {this_key} environment variable is set.")
-#                 else:
-#                     self.found_llms[this_llm] = False
-#                     print(f", but the {this_key} environment variable is not set, so the {this_llm} package cannot be used.")
-#             except ImportError as e:
-#                 self.found_llms[this_llm] = False
-#                 print(f"{this_llm} package not found, so it cannot be used. Error: {e}")
+    def _after_selection(self, model: str, provider: str) -> None:
+        """Optional hook for telemetry/logging; default no-op."""
+        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Selected model %s (%s)", model, provider)
 
-#         if not any(self.found_llms.values()):
-#             my_critical_error(f"Could not find any large language model APIs. Choices are: {', '.join(self.found_llms.keys())}\nExiting.")
+    # ====================================================
+    # internals
+    # ====================================================
+    def _resolve_config(self, config: LLMConfig) -> LLMConfig:
+        """Hydrate defaults: candidates, scores (with env JSON merge)."""
+        import json
+        # Candidate models
+        cands = list(config.candidate_models) if config.candidate_models else self._default_candidate_models()
+        if not (config.allow_local_models):
+            cands = [m for m in cands if not m.startswith("ollama/")]
 
-#         # 3. Create clients for all successfully imported LLMs.
-#         self.clients: dict[str, Any] = {}
-#         for llm in self.found_llms:
-#             if self.found_llms[llm]:
-#                 # ADD NEW COMPANY LLMs HERE.
-#                 if   llm == "OpenAI":
-#                     self.clients[llm] = self.llm_modules[llm].OpenAI()
-#                 elif llm == "Anthropic":
-#                     self.clients[llm] = self.llm_modules[llm].Anthropic()
-#                 else:
-#                     print(f"Can't create client for unknown LLM: {llm}")
-#                     sys.exit()
+        # Model scores: default + env JSON override + config.model_scores
+        scores = self._default_model_scores()
+        json_path = os.getenv("LLM_MODEL_SCORES_JSON")
+        if json_path:
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for k, v in data.items():
+                    try:
+                        scores[k] = float(v)
+                    except Exception:
+                        logging.warning("Invalid score for %s in %s; skipping", k, json_path)
+            except Exception as e:
+                logging.warning("Failed to load LLM_MODEL_SCORES_JSON from %s: %s", json_path, e)
+        # Merge config-provided scores
+        for k, v in config.model_scores.items():
+            try:
+                scores[k] = float(v)
+            except Exception:
+                logging.warning("Invalid score for %s in config.model_scores; skipping", k)
 
-#     def send_prompt(self, prompt: str, system_message: str,
-#                     model: str, company: str, temperature: float,
-#                     max_tokens: int = 1000) -> str:
-#         """Call the chosen LLM's API and return the text response."""
-#         # ADD NEW COMPANY LLMs HERE.
-#         if company == "OpenAI":
-#             response_obj = self.clients[company].chat.completions.create(
-#                 model=model,
-#                 temperature=temperature,
-#                 messages=[{"role": "system", "content": system_message},
-#                           {"role": "user",   "content": prompt}]
-#             )
-#             return response_obj.choices[0].message.content
-#         elif company == "Anthropic":
-#             response_obj = self.clients[company].messages.create(
-#                 model=model,
-#                 max_tokens=max_tokens,
-#                 temperature=temperature,
-#                 system=system_message,
-#                 messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-#             )
-#             return response_obj.content[0].text
-#         else:
-#             my_critical_error(f"Unknown company: {company}")
+        hydrated = replace(config, candidate_models=cands, model_scores=scores)
+        return hydrated
+
+    def _filter_candidates(self, candidates: list[ModelInfo],
+                           ctx: SelectionContext) -> tuple[list[ModelInfo], dict[str, list[str]]]:
+        """Filter by availability, context, and optional locality. Return filtered list and reasons per model name."""
+        filtered:     list[ModelInfo] = []
+        reasons: dict[str, list[str]] = {}
+
+        for mi in candidates:
+            r: list[str] = []
+            if not mi.available:
+                r.append("provider_not_available")
+            if mi.context_window < ctx.min_context_tokens:
+                r.append(f"context_too_small({mi.context_window}<{ctx.min_context_tokens})")
+            if ctx.require_local and not mi.is_local:
+                r.append("requires_local")
+            if r:
+                reasons[mi.name] = r
+            else:
+                filtered.append(mi)
+
+        return filtered, reasons
+
+    def _provider_for(self, model: str) -> str:
+        if model.startswith("ollama/"):
+            return "Ollama"
+        if model.startswith("gpt-") or model.startswith("o1-"):
+            return "OpenAI"
+        if model.startswith("claude-"):
+            return "Anthropic"
+        return "LiteLLM"
+
+    def _is_provider_available(self, provider: str) -> bool:
+        if provider == "Ollama":
+            return True  # assume local endpoint reachable
+        env_var = self._PROVIDER_ENV.get(provider)
+        if not env_var:
+            return True
+        return env_var in os.environ
+
+    def _build_model_info(self, model: str, cfg: LLMConfig) -> ModelInfo:
+        provider               = self._provider_for(model)
+        available              = self._is_provider_available(provider)
+        in_cost, out_cost, ctx = self._get_model_pricing_and_context(model)
+        perf                   = float(cfg.model_scores.get(model, 0.5))
+        is_local               = model.startswith("ollama/")
+        meta: dict[str, Any]   = {}
+        # Make it easy to inspect where values came from
+        meta["provider"]       = provider
+        meta["pricing_source"] = "cache_or_litellm_or_fallback"
+        return ModelInfo(
+            name=model,
+            provider=provider,
+            context_window=ctx,
+            input_cost_per_token=in_cost,
+            output_cost_per_token=out_cost,
+            is_local=is_local,
+            available=available,
+            performance_score=perf,
+            meta=meta
+        )
+
+    def _ensure_litellm(self) -> None:
+        if self._litellm_ready:
+            return
+        try:
+            import litellm  # type: ignore
+            self._litellm_mod   = litellm
+            self._litellm_ready = True
+        except ImportError as e:
+            my_critical_error(f"LiteLLM is enabled but not installed. `pip install litellm` Error: {e}")
+
+    # Pricing/context helpers with caching
+    def _get_model_pricing_and_context(self, model: str) -> tuple[float, float, int]:
+        """
+        Returns (input_cost_per_token, output_cost_per_token, context_window).
+        Prices normalized to $/token (not per-1k). Unknown remote prices get a very high sentinel;
+        local (ollama/*) always returns 0 for both.
+        """
+        if model in self._pricing_cache:
+            return self._pricing_cache[model]
+
+        # Local pricing convention: free ($0)
+        if model.startswith("ollama/"):
+            ctx = self._DEFAULT_CONTEXT.get(model, 8192)
+            self._pricing_cache[model] = (0.0, 0.0, ctx)
+            return self._pricing_cache[model]
+
+        in_cost  = None
+        out_cost = None
+        context  = self._DEFAULT_CONTEXT.get(model, 8192)
+
+        try:
+            # Only import if needed; use LiteLLM if present (even if routing legacy)
+            import litellm  # type: ignore
+
+            # Try get_model_info if available
+            info_fn = getattr(litellm, "get_model_info", None)
+            md = {}
+            if callable(info_fn):
+                try:
+                    md = info_fn(model) or {}
+                except Exception:
+                    md = {}
+
+            # Try common key paths
+            # Per-token
+            cpit    = self._deep_get(md, ["input_cost_per_token"])
+            cppt    = self._deep_get(md, ["output_cost_per_token"])
+            # Per-1k
+            cpik    = self._deep_get(md, ["input_cost_per_1k_tokens"])
+            cpok    = self._deep_get(md, ["output_cost_per_1k_tokens"])
+            max_ctx = self._deep_get(md, ["max_input_tokens"]) or self._deep_get(md, ["max_tokens"])
+
+            if max_ctx:
+                try:
+                    context = int(max_ctx)
+                except Exception:
+                    pass
+
+            # Fill costs
+            if cpit is not None and cppt is not None:
+                in_cost, out_cost = float(cpit), float(cppt)
+            elif cpik is not None and cpok is not None:
+                in_cost, out_cost = float(cpik) / 1000.0, float(cpok) / 1000.0
+
+            # Fallback to model_cost map
+            if in_cost is None or out_cost is None:
+                cost_map = getattr(litellm, "model_cost", None) or getattr(litellm, "litellm_model_cost", None)
+                if isinstance(cost_map, dict) and model in cost_map:
+                    row = cost_map[model]
+                    if in_cost is None:
+                        if "input_cost_per_token" in row:
+                            in_cost  = float(row["input_cost_per_token"])
+                        elif "input_cost_per_1k_tokens" in row:
+                            in_cost  = float(row["input_cost_per_1k_tokens"]) / 1000.0
+                    if out_cost is None:
+                        if "output_cost_per_token" in row:
+                            out_cost = float(row["output_cost_per_token"])
+                        elif "output_cost_per_1k_tokens" in row:
+                            out_cost = float(row["output_cost_per_1k_tokens"]) / 1000.0
+
+        except Exception as e:
+            # LiteLLM not installed or metadata lookup failed — we'll use fallbacks below
+            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("LiteLLM pricing/context lookup failed for %s: %s", model, e)
+
+        # Finalize with fallbacks/sentinels
+        if in_cost is None:
+            in_cost  = 9e9  # de-prioritize unknown cost
+        if out_cost is None:
+            out_cost = 9e9
+
+        self._pricing_cache[model] = (float(in_cost), float(out_cost), int(context))
+        return self._pricing_cache[model]
+
+    @staticmethod
+    def _deep_get(d: dict[str, Any], path: list[str]) -> Any:
+        cur: Any = d
+        for key in path:
+            if not isinstance(cur, dict) or key not in cur:
+                return None
+            cur = cur[key]
+        return cur
+
+    @staticmethod
+    def _extract_text_from_openai_like(resp: Any) -> str:
+        """Normalize content extraction across dict/object forms."""
+        # pydantic-like / attribute
+        try:
+            return resp.choices[0].message.content  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        # dict-like
+        try:
+            return resp["choices"][0]["message"]["content"]  # type: ignore[index]
+        except Exception:
+            pass
+        # object-like with dict message
+        try:
+            return resp.choices[0].message["content"]  # type: ignore[index]
+        except Exception:
+            pass
+        # As last resort, stringify
+        return str(resp)
 
 
 class MemoryHandler(logging.Handler):
