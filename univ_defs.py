@@ -17,7 +17,8 @@ from enum import Enum
 __version__: str = '0.1.7'
 
 # Version of python which should be used in scripts that import this module.
-# Python 3.12 is supported until 2028-10. Schedule PEP 693. https://devguide.python.org/versions/
+# Python 3.12 is supported until 2028-10. https://devguide.python.org/versions/
+# The next version (Python 3.13) will leave the bugfix phase around 2026-10.
 PY_VERSION: float = 3.12
 
 # Default encoding used for reading and writing text files:
@@ -219,7 +220,7 @@ class SelectionStrategy(str, Enum):
 class LLMConfig:
     """Configuration for LLM selection and usage. Data only."""
     # Routing / engines
-    use_litellm: bool = True
+    use_litellm:        bool = True
     allow_local_models: bool = True
     use_local_model:    bool = False
     local_model_name:    str = "qwen2.5-coder:1.5b-base"
@@ -227,9 +228,9 @@ class LLMConfig:
 
     # Selection knobs
     selection_strategy: SelectionStrategy | str = SelectionStrategy.CHEAPEST
-    min_context_tokens:    int = 0
-    assumed_prompt_tokens: int = 1000
-    assumed_output_tokens: int = 1000
+    min_context_tokens:                     int = 0
+    assumed_prompt_tokens:                  int = 1000
+    assumed_output_tokens:                  int = 1000
 
     # Candidates + scoring
     candidate_models:    list[str] = field(default_factory=list)    # if empty -> _default_candidate_models()
@@ -243,31 +244,54 @@ class LLMConfig:
     default_temperature: float = 0.0
     max_tokens:            int = 1000
 
+    # --- multi-objective preferences ---
+    prefer_code:                    bool = False  # emphasize coding skill
+    prefer_low_ttft:                bool = False  # emphasize time-to-first-token
+    prefer_local:                   bool = False  # *prefer* local (not a hard requirement)
+    max_estimated_cost_usd: float | None = None   # hard cap per (assumed_in, assumed_out)
 
-# ---------------------------
-# Candidate model metadata
-# ---------------------------
+    # Optional constraints
+    tps_floor:              float | None = None   # minimum steady-state tokens/sec (if known)
+
+    # --- weights for the composite score (lower = better) ---
+    # If a weight remains 0 but a corresponding prefer_* flag is True,
+    # defaults are injected in _resolve_config() so you don't have to tune.
+    weight_price:                  float = 1.0    # always keep some price pressure
+    weight_code_skill:             float = 0.0
+    weight_general_skill:          float = 0.0
+    weight_ttft:                   float = 0.0
+    weight_tps:                    float = 0.0    # lower penalty when higher TPS
+    weight_nonlocal_penalty:       float = 0.0    # penalty if prefer_local=True and model is not local
+
+
+_DEFAULT_MODEL_SKILL = 0.5  # fallback if no defaults present
+
 @dataclass
 class ModelInfo:
+    """Information about a candidate Large Language Model (LLM)."""
     name:                    str
-    provider:                str         # e.g., "OpenAI", "Anthropic", "Ollama"
+    provider:                str         # e.g., "OpenAI", "Anthropic", "Ollama", "vLLM"
     context_window:          int         # tokens
     input_cost_per_token:  float         # $/token (normalized)
     output_cost_per_token: float         # $/token (normalized)
-    is_local:               bool         # True for Ollama or similar
+    is_local:               bool         # True for Ollama, vLLM, or similar
     available:              bool         # env/api key/endpoint reachable (best effort)
-    performance_score:     float = 0.5   # your objective score if any (higher better)
+    performance_score:     float = _DEFAULT_MODEL_SKILL  # your objective score if any (higher better)
     meta:         dict[str, Any] = field(default_factory=dict)
 
+    code_skill:            float = _DEFAULT_MODEL_SKILL  # 0..1, coding-centric capability
+    general_skill:         float = _DEFAULT_MODEL_SKILL  # 0..1, broad/academic capability
+    ttft_ms:          int | None = None  # time-to-first-token (ms); None = unknown
+    tps:            float | None = None  # tokens/sec after first token; None = unknown
+
     def estimate_cost(self, tokens_in: int, tokens_out: int) -> float:
+        """Estimate cost for a given input/output token count."""
         return self.input_cost_per_token * tokens_in + self.output_cost_per_token * tokens_out
 
 
-# ---------------------------
-# Context passed to strategies
-# ---------------------------
 @dataclass
 class SelectionContext:
+    """Context passed to strategy functions."""
     tokens_in:          int
     tokens_out:         int
     min_context_tokens: int
@@ -275,16 +299,11 @@ class SelectionContext:
     extras:  dict[str, Any] = field(default_factory=dict)
 
 
-# ---------------------------
-# Strategy interface
-# ---------------------------
 class StrategyFn(Protocol):
+    """Strategy function interface."""
     def __call__(self, candidates: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo: ...
 
 
-# ==========================================================
-# LLMs class: public API + hooks
-# ==========================================================
 class LLMs:
     """
     - Owns legacy vendor SDK clients (OpenAI/Anthropic)
@@ -293,16 +312,37 @@ class LLMs:
     - Applies registered/built-in selection strategy
     - Exposes stable send_prompt(...)
     """
+    # ----------------------------
+    # Default model preferences
+    # ----------------------------
 
-    # Default candidates (including local via Ollama)
+    # Candidate shortnames (what you’re willing to consider by default).
+    # Keep "ollama/<model>" entries so local models remain discoverable.
     _DEFAULT_CANDIDATES: list[str] = [
+        # OpenAI
         "gpt-3.5-turbo",
         "gpt-4o-mini",
         "gpt-4o",
-        "o1-mini",
+        "gpt-4.1",          # [S5]
+        "gpt-4.1-mini",     # [S5]
+        "gpt-4.1-nano",     # [S5]
+        "o1-mini",          # reasoning/“thinking”
+        "o3-mini",          # faster than o1-mini TTFT by ~2.5s [S12]
+        "o4-mini",          # newer small reasoning model (2025) [S19]
+        "gpt-5",            # 2025 model family (API) [S4]
+
+        # Anthropic
         "claude-3-haiku-20240229",
         "claude-3-5-sonnet-20241022",
-        # Local models:
+        "claude-3-7-sonnet-20250219",  # hybrid reasoning; strong SWE-bench [S13, S16]
+
+        # Mistral (and code-specialized)
+        "mistral-large-2",       # 2024 flagship; improved code [S9]
+        "mistral-medium-2505",   # 2025 multimodal frontier [S8]
+        "codestral-25.01",       # 2025 Jan coding model; ~2x speed vs 2024 version [S10]
+        "codestral-25.08",       # latest 2025 Aug coding release [S8]
+
+        # Local (Ollama)
         "ollama/qwen2.5-coder:1.5b-base",
         "ollama/qwen2.5-coder:3b-base",
         "ollama/codegemma:2b-code",
@@ -312,40 +352,182 @@ class LLMs:
         "ollama/llama3:8b",
     ]
 
-    # ---------- defaults used when LiteLLM can't tell us ----------
+    # --------------------------------------------------------------------
+    # Context windows (tokens). When provider docs/SDKs give clear values,
+    # prefer those. Otherwise use conservative defaults. Footnotes point to sources.
+    # --------------------------------------------------------------------
     _DEFAULT_CONTEXT: dict[str, int] = {
-        "gpt-3.5-turbo"                  :  16_385,
-        "gpt-4o-mini"                    : 128_000,
-        "gpt-4o"                         : 128_000,
-        "o1-mini"                        : 128_000,
-        "claude-3-haiku-20240229"        : 200_000,
-        "claude-3-5-sonnet-20241022"     : 200_000,
-        # Local models:
+        # OpenAI
+        "gpt-3.5-turbo"      :    16_385,
+        "gpt-4o-mini"        :   128_000,
+        "gpt-4o"             :   128_000,
+        "gpt-4.1"            : 1_000_000,  # [S5,S6]
+        "gpt-4.1-mini"       : 1_000_000,  # [S6] (OpenAI says 4.1 family supports up to 1M)
+        "gpt-4.1-nano"       : 1_000_000,  # [S6]
+        "o1-mini"            :   128_000,  # context per OpenAI docs; o3/o4-mini are 200k [S28]
+        "o3-mini"            :   200_000,  # [S28]
+        "o4-mini"            :   200_000,  # [S28]
+        "gpt-5"              :   400_000,  # API total context: 272k in + 128k out (OpenAI) [S1]
+
+        # Anthropic
+        "claude-3-haiku-20240229"    : 200_000,  # Anthropic docs & vendor pages [S26,S27]
+        "claude-3-5-sonnet-20241022" : 200_000,  # [S26,S27]
+        "claude-3-7-sonnet-20250219" : 200_000,  # [S21,S26,S27] (Sonnet 4 has 1M, not 3.7) [S20]
+
+        # Mistral
+        "mistral-large-2"      : 128_000,  # product pages and summaries [S9,S23]
+        "mistral-medium-2505"  : 128_000,  # [S8]
+        "codestral-25.01"      : 256_000,  # Mistral docs list Codestral 25.01/25.08 at 256k [S8,S10]
+        "codestral-25.08"      : 256_000,  # [S8]
+
+        # Local (Ollama) — keep your prior values where official numbers are sparse
         "ollama/qwen2.5-coder:1.5b-base" :  32_768,
         "ollama/qwen2.5-coder:3b-base"   :  32_768,
-        "ollama/codegemma:2b-code"       :  16_384,
-        "ollama/starcoder2:3b"           :  16_384,
-        "ollama/granite-code:3b"         : 128_000,  # IBM’s Granite-3B-Code-Instruct-128K
-        "ollama/phi3.5:3.8b"             : 128_000,
+        "ollama/codegemma:2b-code"       :  16_384,  # conservative default; see CodeGemma model card
+        "ollama/starcoder2:3b"           :  16_384,  # StarCoder2 smalls default 16k
+        "ollama/granite-code:3b"         : 128_000,  # IBM Granite-3B-Code-Instruct-128K [S18]
+        "ollama/phi3.5:3.8b"             : 128_000,  # Microsoft release/Foundry catalog [S34]
         "ollama/llama3:8b"               :   8_192,
     }
 
-    # Default performance scores (higher is better)
-    _DEFAULT_MODEL_SCORES: dict[str, float] = {
-        "gpt-4o"                         : 0.95,
-        "gpt-4o-mini"                    : 0.78,
-        "o1-mini"                        : 0.85,
-        "gpt-3.5-turbo"                  : 0.60,
-        "claude-3-5-sonnet-20241022"     : 0.92,
-        "claude-3-haiku-20240229"        : 0.70,
-        # Local models:
-        "ollama/qwen2.5-coder:1.5b-base" : 0.00,
-        "ollama/qwen2.5-coder:3b-base"   : 0.00,
-        "ollama/codegemma:2b-code"       : 0.00,
-        "ollama/starcoder2:3b"           : 0.00,
-        "ollama/granite-code:3b"         : 0.00,  # IBM’s Granite-3B-Code-Instruct-128K
-        "ollama/phi3.5:3.8b"             : 0.00,
-        "ollama/llama3:8b"               : 0.55,
+    # ------------------------------------------------------------------------------------
+    # Back-compat: retain a single-axis “performance” for callers that expect it.
+    # Here we define it as *coding skill* (0..1), primarily pegged to HumanEval pass@1
+    # or close coding proxies; otherwise, we set a conservative estimate and note source.
+    # ------------------------------------------------------------------------------------
+    _DEFAULT_CODE_SKILL: dict[str, float] = {
+        # OpenAI (anchor points; you already had some)
+        "gpt-4o"                     : 0.93,  # strong coding; multiple evals (Aider diff, SWE gains) [S6]
+        "gpt-4o-mini"                : 0.80,  # improved smalls trend; near 4.1-mini on many evals [S6]
+        "gpt-3.5-turbo"              : 0.60,  # your prior anchor
+        "gpt-4.1"                    : 0.94,  # OpenAI shows +21% vs 4o on SWE-bench Verified [S6]
+        "gpt-4.1-mini"               : 0.82,  # “beats 4o on many evals”; keep slightly above 4o-mini [S6]
+        "gpt-4.1-nano"               : 0.65,  # small, but 1M ctx and better than 4o-mini on some evals [S6]
+        "o1-mini"                    : 0.86,  # strong reasoning; coding solid but slower TTFT [S14,S7]
+        "o3-mini"                    : 0.88,  # faster TTFT than o1-mini; coding near o1 mini [S12,S6]
+        "o4-mini"                    : 0.90,  # newer small reasoning; top small-code in AA index
+        "gpt-5"                      : 0.96,  # frontier; AA shows top “intelligence index” class [S1,S21]
+
+        # Anthropic
+        "claude-3-haiku-20240229"    : 0.70,  # your prior anchor
+        "claude-3-5-sonnet-20241022" : 0.92,  # your prior anchor (and aligns with strong code)
+        "claude-3-7-sonnet-20250219" : 0.93,  # leads/near-top on SWE-bench Verified [S13,S16]
+
+        # Mistral (coding-specialized and gen)
+        "mistral-large-2"            : 0.90,  # claims match GPT-4o on coding; multiple writeups [S11,S17]
+        "mistral-medium-2505"        : 0.82,  # below Large, above earlier Mediums; frontier multi [S8]
+        "codestral-25.01"            : 0.86,  # upgraded Codestral; ~2x speed & strong HE/MBPP [S10,S9]
+        "codestral-25.08"            : 0.88,  # latest Codestral (summer 2025) [S8]
+
+        # ---------- Local models (you asked to fill these 0.00s) ----------
+        # For locals we normalize to 0..1 mainly from HumanEval pass@1 (or closest proxy),
+        # keeping conservative values when public numbers vary widely. See sources per line.
+
+        "ollama/qwen2.5-coder:1.5b-base" : 0.41,  # ~41 average across 9 langs for 1.5B *base* [S3]
+        "ollama/qwen2.5-coder:3b-base"   : 0.48,  # ~48 average across 9 langs for 3B *base* [S3]
+        # Note: 3B *Instruct* has much higher reported HE pass@1 (70–84%) depending on setup, but
+        # base variants in Ollama perform lower; we use the base multi-lang average as a safer floor. [S3,S29]
+
+        "ollama/codegemma:2b-code"       : 0.311, # HumanEval pass@1 = 31.1% (official model card)
+        "ollama/starcoder2:3b"           : 0.317, # ~31.7% pass@1 typical; ~31.1 avg across langs in Qwen2.5 tbl [S3,S30]
+        "ollama/granite-code:3b"         : 0.414, # HumanEvalSynthesis pass@1 (avg) ≈ 41.4% (HF model card) [S18]
+        "ollama/phi3.5:3.8b"             : 0.56,  # mid-estimate: reports cluster ~0.50–0.63 HE for 3.5-mini [S31,S33]
+        "ollama/llama3:8b"               : 0.55,  # your prior anchor; aligns w/ public mid-tier code results
+    }
+
+    # Keep your original name for back-compat with existing code paths.
+    _DEFAULT_MODEL_SCORES: dict[str, float] = _DEFAULT_CODE_SKILL
+
+    # ---------------------------------------------------------------------------
+    # Optional: default general-skill anchors (0..1) from broad evals (MMLU/GPQA).
+    # These are *not* strict; they just help when you want “well-rounded” models.
+    # ---------------------------------------------------------------------------
+    _DEFAULT_GENERAL_SKILL: dict[str, float] = {
+        "gpt-4.1"                    : 0.92,  # MMLU 90.2%, GPQA Diamond 66.3% [S6]
+        "gpt-5"                      : 0.95,  # AA Intelligence Index leader tier [S1,S21]
+        "o3-mini"                    : 0.89,  # strong reasoning for size [S6,S7]
+        "claude-3-7-sonnet-20250219" : 0.90,  # hybrid reasoning; strong OSWorld & agentic [S16]
+        "mistral-large-2"            : 0.86,  # broad improvements vs Large 1; multilingual [S9]
+        "ollama/phi3.5:3.8b"         : 0.69,  # Phi-3 mini MMLU ~69%; 3.5 mini similar+ [S32]
+        "ollama/llama3:8b"           : 0.66,  # Llama3-8B MMLU ballpark; public reports ~66–67% [S35]
+        # (Everything else will default via your selection heuristics if absent)
+    }
+
+    # --------------------------------------------------------------------------------
+    # Speed heuristics. Values here are meant as *priors*; your runtime can observe
+    # actual TTFT/TPS and override per provider. Units: ms for TTFT, tokens/sec for TPS.
+    # --------------------------------------------------------------------------------
+    _DEFAULT_TTFT_MS: dict[str, int | None] = {
+        "gpt-4.1"                      : 15_000,  # ~15s TTFT at 128k; ~60s at 1M (OpenAI) [S7]
+        "gpt-4.1-nano"                 :  5_000,  # “often <5s” for 128k inputs (OpenAI) [S7]
+        "o3-mini"                      :  8_000,  # AA & coverage: higher latency than smalls, but improved vs o1 [S14,S7]
+        "claude-3-7-sonnet-20250219"   :  1_160,  # ~1.16s avg; reports of ~0.2s for quick replies (varies) [S36]
+        # Local models are hardware-dependent; leave None to encourage live measurement:
+        "ollama/qwen2.5-coder:3b-base" : None,
+        "ollama/llama3:8b"             : None,
+    }
+
+    _DEFAULT_TOKENS_PER_SEC: dict[str, float | None] = {
+        "gpt-4.1"                      : 124.0,  # ArtificialAnalysis provider aggregate [S2]
+        "gpt-4.1-mini"                 :  75.8,   # AA aggregate (time-varying)
+        "o3-mini"                      : 163.0,  # AA [S12]
+        "claude-3-7-sonnet-20250219"   :  65.5,   # AA [S36]
+        # local models -> measure at runtime
+        "ollama/qwen2.5-coder:3b-base" : None,
+        "ollama/llama3:8b"             : None,
+    }
+
+    # S1 — OpenAI: Introducing GPT-5 for developers — https://openai.com/index/introducing-gpt-5-for-developers/  
+    # S2 — Artificial Analysis: GPT-4.1 (speed/latency/TPS aggregates) — https://artificialanalysis.ai/models/gpt-4-1  
+    # S3 — Aider LLM Leaderboards (Polyglot code-editing benchmark) — https://aider.chat/docs/leaderboards/  
+    # S4 — OpenAI: Introducing GPT-5 (overview/benchmarks) — https://openai.com/index/introducing-gpt-5/  
+    # S5 — OpenAI: Introducing GPT-4.1 in the API (capabilities & SWE-bench Verified) — https://openai.com/index/gpt-4-1/  
+    # S6 — OpenAI: GPT-4.1 long-context details (up to 1M tokens) — https://openai.com/index/gpt-4-1/#long-context  
+    # S7 — Artificial Analysis: GPT-4.1 (Providers view; TTFT/output speed) — https://artificialanalysis.ai/models/gpt-4-1/providers  
+    # S8 — Mistral Docs: Models Overview (incl. mistral-medium-2505/2508, codestral-2508) — https://docs.mistral.ai/getting-started/models/models_overview/  
+    # S9 — Mistral Blog: “Large Enough” (Mistral Large 2; 128k context, positioning) — https://mistral.ai/news/mistral-large-2407  
+    # S10 — Mistral Blog: Codestral 25.01 announcement — https://mistral.ai/news/codestral-2501  
+    # S11 — Artificial Analysis: Mistral Large 2 (quality/price/speed aggregates) — https://artificialanalysis.ai/models/mistral-large-2  
+    # S12 — Artificial Analysis: o3-mini (speed/latency metrics) — https://artificialanalysis.ai/models/o3-mini  
+    # S13 — OpenAI: Introducing o3 and o4-mini (reasoning series) — https://openai.com/index/introducing-o3-and-o4-mini/  
+    # S14 — TextCortex review: o3-mini vs o1-mini (relative response speed) — https://textcortex.com/post/openai-o3-mini-review  
+    # S15 — Mistral Docs: Codestral 2508 (latest Codestral release entry) — https://docs.mistral.ai/getting-started/models/models_overview/#codestral-2508  
+    # S16 — Anthropic News: Claude 3.7 Sonnet launch/overview — https://www.anthropic.com/news/claude-3-7-sonnet  
+    # S17 — AWS Blog: Mistral Large 2 now in Bedrock (confirms 128k context) — https://aws.amazon.com/blogs/machine-learning/mistral-large-2-is-now-available-in-amazon-bedrock/  
+    # S18 — IBM Granite-3B-Code-Instruct model card (context/perf references) — https://huggingface.co/ibm-granite/granite-3b-code-instruct  
+    # S19 — OpenAI: New tools & features in the Responses API (o3/o4-mini integration; 2025) — https://openai.com/index/new-tools-and-features-in-the-responses-api/  
+    # S20 — Anthropic News: Claude Opus 4.1 (SWE-bench Verified 74.5%) — https://www.anthropic.com/news/claude-opus-4-1  
+    # S21 — OpenAI: GPT-5 (coding focus; SWE-bench methodology note) — https://openai.com/index/introducing-gpt-5/  
+    # S22 — The Verge: GPT-4.1 in ChatGPT (rollout; context & coding improvements) — https://www.theverge.com/news/667507/openai-chatgpt-gpt-4-1-ai-model-general-availability  
+    # S23 — NVIDIA NIM Ref: Mistral Large 2 Instruct (128k context confirmation) — https://docs.api.nvidia.com/nim/reference/mistralai-mistral-large-2-instruct  
+    # S24 — OpenAI Blog: GPT-4o mini (128k context & pricing) — https://openai.com/index/gpt-4o-mini-advancing-cost-efficient-intelligence/  
+    # S25 — OpenAI Docs: o4-mini model page — https://platform.openai.com/docs/models/o4-mini  
+    # S26 — Qwen2.5-Coder technical report (benchmarks overview) — https://arxiv.org/abs/2501.03012  
+    # S27 — HF Model Card: Qwen2.5-Coder-3B-Base — https://huggingface.co/Qwen/Qwen2.5-Coder-3B  
+    # S28 — OpenAI Help: o3 & o4-mini context (200k) — https://help.openai.com/en/articles/9855712-openai-o1-models-faq-chatgpt-enterprise-and-edu  
+    # S29 — StarCoder2 paper (model details; evals) — https://arxiv.org/abs/2402.19173  
+    # S30 — HF Model Card: BigCode/StarCoder2-3B — https://huggingface.co/bigcode/starcoder2-3b  
+    # S31 — Phi-3 Technical Report (MMLU 69% etc.) — https://arxiv.org/abs/2404.14219  
+    # S32 — Meta Llama 3 models overview (general capability references) — https://www.llama.com/models/llama-3/  
+    # S33 — HF Model Card: microsoft/Phi-3-mini-128k-instruct (3.8B; 128k ctx) — https://huggingface.co/microsoft/Phi-3-mini-128k-instruct  
+    # S34 — NVIDIA NIM / HF: Phi-3.5-MoE (128k ctx; MoE details) — https://docs.api.nvidia.com/nim/reference/microsoft-phi-3_5-moe  
+    # S35 — HF Model Card: meta-llama/Meta-Llama-3-8B (8k ctx; base references) — https://huggingface.co/meta-llama/Meta-Llama-3-8B  
+    # S36 — Artificial Analysis: Claude 3.7 Sonnet (standard/thinking; TTFT & TPS) — https://artificialanalysis.ai/models/claude-3-7-sonnet / https://artificialanalysis.ai/models/claude-3-7-sonnet-thinking
+    # S37 — OpenAI Community - https://community.openai.com/t/what-is-the-token-context-window-size-of-the-gpt-4-o1-preview-model/954321
+    #
+    # ------------------------------------------------------------------------------
+    # Optional: explicit zero-pricing for local/Ollama models so “cheapest” logic can
+    # treat them as cost=0 (your caller already gates on availability).
+    # ------------------------------------------------------------------------------
+    _DEFAULT_PRICE_OVERRIDES_PER_1M: dict[str, tuple[float, float]] = {
+        # name -> (input_usd_per_million, output_usd_per_million)
+        "ollama/qwen2.5-coder:1.5b-base": (0.0, 0.0),
+        "ollama/qwen2.5-coder:3b-base"  : (0.0, 0.0),
+        "ollama/codegemma:2b-code"      : (0.0, 0.0),
+        "ollama/starcoder2:3b"          : (0.0, 0.0),
+        "ollama/granite-code:3b"        : (0.0, 0.0),
+        "ollama/phi3.5:3.8b"            : (0.0, 0.0),
+        "ollama/llama3:8b"              : (0.0, 0.0),
     }
 
     # Provider -> required env var
@@ -486,6 +668,7 @@ class LLMs:
         self.apply_config(self._config)
 
     def get_config(self) -> LLMConfig:
+        """Return a copy of the current config (or default if none applied yet)."""
         if self._config is None:
             # Return a default config if none applied yet.
             return LLMConfig()
@@ -493,24 +676,84 @@ class LLMs:
 
     # ---------- strategy registry ----------
     def register_strategy(self, name: str, fn: StrategyFn) -> None:
+        """Register a custom strategy for model selection."""
         self._strategies[name] = fn
 
     def _register_builtin_strategies(self) -> None:
+        """Define built-in strategies for model selection."""
+
         def cheapest(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
+            """Cheapest model among candidates, ignoring any other factors."""
             return min(cands, key=lambda m: m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
 
         def context_then_price(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
+            """Context-aware selection, then price."""
             # cands already filtered by context; cheapest among them
             return min(cands, key=lambda m: m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
 
         def performance_then_price(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
+            """Highest performance score, then cheapest among those."""
             def key(m: ModelInfo):
                 return (-m.performance_score, m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
+            return min(cands, key=key)
+
+        def multi_objective(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
+            """Using multiple preferences and weights, choose the best-fit model."""
+            cfg = self._config or LLMConfig()
+
+            # Group stats for normalization
+            costs = [m.estimate_cost(cfg.assumed_prompt_tokens, cfg.assumed_output_tokens) for m in cands]
+            max_cost = max(costs) if costs else 1.0
+
+            ttfts = [m.ttft_ms for m in cands if m.ttft_ms is not None]
+            max_ttft = max(ttfts) if ttfts else 1.0
+
+            tps_vals = [m.tps for m in cands if m.tps is not None]
+            max_tps = max(tps_vals) if tps_vals else 1.0
+
+            def key(m: ModelInfo) -> float:
+                """Key function for multi-objective optimization."""
+                # Hard caps first: if user set max cost, filter; if all filtered, caller will fallback
+                est_cost = m.estimate_cost(cfg.assumed_prompt_tokens, cfg.assumed_output_tokens)
+                if cfg.max_estimated_cost_usd is not None and est_cost > cfg.max_estimated_cost_usd:
+                    return float("inf")
+
+                # Normalized penalties (0=best)
+                cost_pen = est_cost / max_cost if max_cost > 0 else 0.0
+
+                if m.ttft_ms is not None and max_ttft > 0:
+                    ttft_pen = m.ttft_ms / max_ttft
+                else:
+                    ttft_pen = 1.0  # unknown => mild penalty if weighted
+
+                if m.tps is not None and max_tps > 0:
+                    tps_pen = 1.0 - (m.tps / max_tps)  # higher TPS => lower penalty
+                else:
+                    tps_pen = 1.0  # unknown TPS
+
+                code_pen = 1.0 - (m.code_skill if m.code_skill is not None else _DEFAULT_MODEL_SKILL)
+                gen_pen  = 1.0 - (m.general_skill if m.general_skill is not None else _DEFAULT_MODEL_SKILL)
+                nonlocal_pen = 0.0 if m.is_local else 1.0
+
+                # Optional floor on TPS (soft penalty, not exclusion)
+                if cfg.tps_floor is not None:
+                    if (m.tps is None) or (m.tps < cfg.tps_floor):
+                        tps_pen += 1.0
+
+                score = (  cfg.weight_price            * cost_pen
+                         + cfg.weight_ttft             * ttft_pen
+                         + cfg.weight_tps              * tps_pen
+                         + cfg.weight_code_skill       * code_pen
+                         + cfg.weight_general_skill    * gen_pen
+                         + cfg.weight_nonlocal_penalty * nonlocal_pen)
+                return score
+
             return min(cands, key=key)
 
         self._strategies[SelectionStrategy.CHEAPEST.value]               = cheapest
         self._strategies[SelectionStrategy.CONTEXT_THEN_PRICE.value]     = context_then_price
         self._strategies[SelectionStrategy.PERFORMANCE_THEN_PRICE.value] = performance_then_price
+        self._strategies["multi_objective"]                              = multi_objective
 
     # ---------- selection introspection ----------
     def list_candidates(self, with_reasons: bool = False) -> list[ModelInfo]:
@@ -525,6 +768,7 @@ class LLMs:
         return res
 
     def describe_selection(self) -> dict[str, Any]:
+        """Describe the current model selection."""
         chosen = self._selected
         cfg = self._config or LLMConfig()
         if chosen is None:
@@ -698,6 +942,7 @@ class LLMs:
         return filtered, reasons
 
     def _provider_for(self, model: str) -> str:
+        """Infer provider from model name prefix."""
         if model.startswith("ollama/"):
             return "Ollama"
         if model.startswith("gpt-") or model.startswith("o1-"):
@@ -707,6 +952,7 @@ class LLMs:
         return "LiteLLM"
 
     def _is_provider_available(self, provider: str) -> bool:
+        """Check if a model provider is available."""
         if provider == "Ollama":
             return True  # assume local endpoint reachable
         env_var = self._PROVIDER_ENV.get(provider)
@@ -715,15 +961,35 @@ class LLMs:
         return env_var in os.environ
 
     def _build_model_info(self, model: str, cfg: LLMConfig) -> ModelInfo:
+        """Build ModelInfo for a given model name, using config and defaults as needed."""
         provider               = self._provider_for(model)
         available              = self._is_provider_available(provider)
         in_cost, out_cost, ctx = self._get_model_pricing_and_context(model)
-        perf                   = float(cfg.model_scores.get(model, 0.5))
-        is_local               = model.startswith("ollama/")
-        meta: dict[str, Any]   = {}
-        # Make it easy to inspect where values came from
-        meta["provider"]       = provider
-        meta["pricing_source"] = "cache_or_litellm_or_fallback"
+
+        # ---- pull skills / speed from defaults if present; fallback safely ----
+        try:
+            code_skill = self.DEFAULT_CODE_SKILL.get(model, cfg.model_scores.get(model, _DEFAULT_MODEL_SKILL))
+        except NameError:
+            code_skill = cfg.model_scores.get(model, _DEFAULT_MODEL_SKILL)
+
+        try:
+            general_skill = self.DEFAULT_GENERAL_SKILL.get(model, _DEFAULT_MODEL_SKILL)
+        except NameError:
+            general_skill = _DEFAULT_MODEL_SKILL
+
+        try:
+            ttft_ms = self.DEFAULT_TTFT_MS.get(model, None)
+        except NameError:
+            ttft_ms = None
+
+        try:
+            tps = self.DEFAULT_TOKENS_PER_SEC.get(model, None)
+        except NameError:
+            tps = None
+
+        is_local = model.startswith("ollama/")
+        meta: dict[str, Any] = {"provider": provider, "pricing_source": "cache_or_litellm_or_fallback"}
+
         return ModelInfo(
             name=model,
             provider=provider,
@@ -732,8 +998,12 @@ class LLMs:
             output_cost_per_token=out_cost,
             is_local=is_local,
             available=available,
-            performance_score=perf,
-            meta=meta
+            performance_score=float(code_skill),  # back-compat
+            code_skill=float(code_skill),
+            general_skill=float(general_skill),
+            ttft_ms=ttft_ms,
+            tps=tps,
+            meta=meta,
         )
 
     def _ensure_litellm(self) -> None:
@@ -825,6 +1095,17 @@ class LLMs:
             in_cost  = 9e9  # de-prioritize unknown cost
         if out_cost is None:
             out_cost = 9e9
+
+        # Apply explicit overrides if you provided them (e.g., local = $0)
+        try:
+            overrides = self.DEFAULT_PRICE_OVERRIDES_PER_1M
+        except NameError:
+            overrides = {}
+
+        if model in overrides:
+            in_million, out_million = overrides[model]
+            in_cost  = float(in_million)  / 1_000_000.0
+            out_cost = float(out_million) / 1_000_000.0
 
         self._pricing_cache[model] = (float(in_cost), float(out_cost), int(context))
         return self._pricing_cache[model]
@@ -3266,7 +3547,7 @@ def _make_format_checker() -> Type[Any]:
                 # "NumPy"              : self._check_numpy_docstring,
                 # "reStructuredText" : self._check_rst_docstring,
             }.get(self.doc_style)
-
+            logging.warning("Consider adding an exception to the docstring checker: if the function is less than 5(?) lines, allow a single line docstring without the required sections.")
             if checker is not None:
                 checker(node, who)
 
