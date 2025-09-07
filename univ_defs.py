@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 
 # Version of univ_defs.py:
-__version__: str = '0.1.7'
+__version__: str = "0.1.7"
 
 # Version of python which should be used in scripts that import this module.
 # Python 3.12 is supported until 2028-10. https://devguide.python.org/versions/
@@ -22,7 +22,7 @@ __version__: str = '0.1.7'
 PY_VERSION: float = 3.12
 
 # Default encoding used for reading and writing text files:
-DEFAULT_ENCODING: str = 'utf-8'
+DEFAULT_ENCODING: str = "utf-8"
 
 # ANSI escape codes
 ANSI_RED:    str = "\033[91m"
@@ -33,23 +33,23 @@ ANSI_RESET:  str = "\033[0m"
 
 # All the formatting rules to ignore when running flake8 to check Python formatting.
 IGNORED_CODES: list[str] = [
-    'W503',  # line break before binary operator (W503 and W504 are mutually exclusive, so ignore both)
-    'W504',  # line break  after binary operator (W503 and W504 are mutually exclusive, so ignore both)
-    'E128',  # continuation line under-indented for visual indent
-    'E201',  # whitespace after '('
-    'E202',  # whitespace before ')'
-    'E203',  # whitespace before ':'
-    'E211',  # whitespace before '('
-    'E221',  # multiple spaces before operator
-    'E222',  # multiple spaces after  operator
-    'E226',  # missing whitespace around arithmetic operator        (the fix doesn't work on the right side even with --aggressive)
-    'E227',  # missing whitespace around bitwise or shift operator  (the fix doesn't work on the right side even with --aggressive)
-    'E241',  # multiple spaces after ','
-    'E251',  # unexpected spaces around keyword / parameter equals
-    'E262',  # inline comment should start with '# '
-    'E271',  # multiple spaces  after keyword
-    'E272',  # multiple spaces before keyword
-    'E701',  # multiple statements on one line (colon)
+    "W503",  # line break before binary operator (W503 and W504 are mutually exclusive, so ignore both)
+    "W504",  # line break  after binary operator (W503 and W504 are mutually exclusive, so ignore both)
+    "E128",  # continuation line under-indented for visual indent
+    "E201",  # whitespace after "("
+    "E202",  # whitespace before ")"
+    "E203",  # whitespace before ":"
+    "E211",  # whitespace before "("
+    "E221",  # multiple spaces before operator
+    "E222",  # multiple spaces after  operator
+    "E226",  # missing whitespace around arithmetic operator        (the fix doesn't work on the right side even with --aggressive)
+    "E227",  # missing whitespace around bitwise or shift operator  (the fix doesn't work on the right side even with --aggressive)
+    "E241",  # multiple spaces after ","
+    "E251",  # unexpected spaces around keyword / parameter equals
+    "E262",  # inline comment should start with "# "
+    "E271",  # multiple spaces  after keyword
+    "E272",  # multiple spaces before keyword
+    "E701",  # multiple statements on one line (colon)
 ]
 
 
@@ -73,30 +73,49 @@ class Options:
         self.home:    Path = Path.home()  # User's home directory
 
 
-class PlotOptions:
+class PlotOptions(Options):
     """Global figure options."""
 
     def __init__(self) -> None:
-        """Initialize PlotOptions class with default values."""
+        """Initialize PlotOptions class with values from the Options class, and default plotting values."""
         # Ideas for improving this parent class: https://chatgpt.com/share/6876a7e2-da84-8006-9c8f-100d243b73e4
-        self.myfigsize: tuple[int, int] = (16, 9)
-        self.fsize:                 int = 24
-        self.dpi_choice:            int = 300
-        # self.colors      are used for shaded areas in light mode or for lines in dark mode
-        # self.lightcolors are used for lines in light mode or for shaded areas in dark mode
-        self.markers:         list[str] = ['o',     's',      '^',         'v',          '<',     '>']
-        self.colors:          list[str] = ['black', 'red',    'blue',      'green',      'purple']
-        self.lightcolors:     list[str] = ['grey',  'pink',   'lightblue', 'lightgreen', 'lightpurple']
-        self.linestyles:      list[str] = ['solid', 'dashed', 'dashdot',   'dotted']
-        self.dark_mode:             int = 0  # 1 = dark mode, 0 = light mode
-        if self.dark_mode:  # Define colors as hexadecimal mainly because VS Code has a nifty color picker for hex colors.
-            self.background_color:  str = '#000000'  # black background for dark mode
-            self.text_color:        str = '#FFFFFF'  # white text for dark mode
-            self.colors:      list[str] = [c.replace('black', 'darkgrey') for c in self.colors]
-            self.lightcolors: list[str] = [c.replace('grey', 'lightgrey') for c in self.lightcolors]
+        super().__init__()
+        self.myfigsize   = (16, 9)
+        self.fsize       = 24
+        self.dpi_choice  = 300
+        # keep immutable “base” palettes so we can recompute safely
+        self._base_colors      = ['black', 'red',    'blue',      'green',      'purple']
+        self._base_lightcolors = ['grey',  'pink',   'lightblue', 'lightgreen', 'lightpurple']
+        self.markers           = ['o',     's',      '^',         'v',          '<',          '>']
+        self.linestyles        = ['solid', 'dashed', 'dashdot',   'dotted']
+
+        self._dark_mode = False   # backing store
+        self._apply_theme()       # derive palettes/background/text from _dark_mode
+
+    @property
+    def dark_mode(self) -> bool:
+        """This is a property, so setting it will also update the theme."""
+        return self._dark_mode
+
+    @dark_mode.setter
+    def dark_mode(self, value: int | bool) -> None:
+        """This is a property with a setter, so any child class that changes self.dark_mode will also update the theme."""
+        self._dark_mode = bool(value)
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        """Apply the current theme (light or dark) to the plot options."""
+        if self._dark_mode:
+            self.background_color = '#000000'
+            self.text_color       = '#FFFFFF'
+            # recompute “view” palettes from the bases
+            self.colors      = [ ('darkgrey' if  c == 'black' else c) for c in self._base_colors ]
+            self.lightcolors = [ ('lightgrey' if c == 'grey'  else c) for c in self._base_lightcolors ]
         else:
-            self.background_color:  str = '#FFFFFF'  # white background for light mode
-            self.text_color:        str = '#000000'  # black text for light mode
+            self.background_color = '#FFFFFF'
+            self.text_color       = '#000000'
+            self.colors      = list(self._base_colors)
+            self.lightcolors = list(self._base_lightcolors)
 
 
 class UnivClass:
@@ -214,6 +233,9 @@ class SelectionStrategy(str, Enum):
     CHEAPEST:               str = "cheapest"
     CONTEXT_THEN_PRICE:     str = "context_then_price"
     PERFORMANCE_THEN_PRICE: str = "performance_then_price"
+    LOWEST_TTFT:            str = "lowest_ttft"
+    FASTEST:                str = "fastest"
+    SMALLEST:               str = "smallest"
 
 
 @dataclass
@@ -264,18 +286,18 @@ class LLMConfig:
     weight_nonlocal_penalty:       float = 0.0    # penalty if prefer_local=True and model is not local
 
 
-_DEFAULT_MODEL_SKILL = 0.5  # fallback if no defaults present
+_DEFAULT_MODEL_SKILL = 0.5  # default skill level for models without specific default skill
 
 @dataclass
 class ModelInfo:
     """Information about a candidate Large Language Model (LLM)."""
     name:                    str
-    provider:                str         # e.g., "OpenAI", "Anthropic", "Ollama", "vLLM"
-    context_window:          int         # tokens
-    input_cost_per_token:  float         # $/token (normalized)
-    output_cost_per_token: float         # $/token (normalized)
-    is_local:               bool         # True for Ollama, vLLM, or similar
-    available:              bool         # env/api key/endpoint reachable (best effort)
+    provider:                str  # e.g., "OpenAI", "Anthropic", "Ollama", "vLLM"
+    context_window:          int  # tokens
+    input_cost_per_token:  float  # $/token (normalized)
+    output_cost_per_token: float  # $/token (normalized)
+    is_local:               bool  # True for Ollama, vLLM, or similar
+    available:              bool  # env/api key/endpoint reachable (best effort)
     performance_score:     float = _DEFAULT_MODEL_SKILL  # your objective score if any (higher better)
     meta:         dict[str, Any] = field(default_factory=dict)
 
@@ -469,23 +491,23 @@ class LLMs:
 
     _DEFAULT_TOKENS_PER_SEC: dict[str, float | None] = {
         "gpt-4.1"                      : 124.0,  # ArtificialAnalysis provider aggregate [S2]
-        "gpt-4.1-mini"                 :  75.8,   # AA aggregate (time-varying)
+        "gpt-4.1-mini"                 :  75.8,  # AA aggregate (time-varying)
         "o3-mini"                      : 163.0,  # AA [S12]
-        "claude-3-7-sonnet-20250219"   :  65.5,   # AA [S36]
+        "claude-3-7-sonnet-20250219"   :  65.5,  # AA [S36]
         # local models -> measure at runtime
         "ollama/qwen2.5-coder:3b-base" : None,
         "ollama/llama3:8b"             : None,
     }
 
-    # S1 — OpenAI: Introducing GPT-5 for developers — https://openai.com/index/introducing-gpt-5-for-developers/  
-    # S2 — Artificial Analysis: GPT-4.1 (speed/latency/TPS aggregates) — https://artificialanalysis.ai/models/gpt-4-1  
-    # S3 — Aider LLM Leaderboards (Polyglot code-editing benchmark) — https://aider.chat/docs/leaderboards/  
-    # S4 — OpenAI: Introducing GPT-5 (overview/benchmarks) — https://openai.com/index/introducing-gpt-5/  
-    # S5 — OpenAI: Introducing GPT-4.1 in the API (capabilities & SWE-bench Verified) — https://openai.com/index/gpt-4-1/  
-    # S6 — OpenAI: GPT-4.1 long-context details (up to 1M tokens) — https://openai.com/index/gpt-4-1/#long-context  
-    # S7 — Artificial Analysis: GPT-4.1 (Providers view; TTFT/output speed) — https://artificialanalysis.ai/models/gpt-4-1/providers  
-    # S8 — Mistral Docs: Models Overview (incl. mistral-medium-2505/2508, codestral-2508) — https://docs.mistral.ai/getting-started/models/models_overview/  
-    # S9 — Mistral Blog: “Large Enough” (Mistral Large 2; 128k context, positioning) — https://mistral.ai/news/mistral-large-2407  
+    #  S1 — OpenAI: Introducing GPT-5 for developers — https://openai.com/index/introducing-gpt-5-for-developers/  
+    #  S2 — Artificial Analysis: GPT-4.1 (speed/latency/TPS aggregates) — https://artificialanalysis.ai/models/gpt-4-1  
+    #  S3 — Aider LLM Leaderboards (Polyglot code-editing benchmark) — https://aider.chat/docs/leaderboards/  
+    #  S4 — OpenAI: Introducing GPT-5 (overview/benchmarks) — https://openai.com/index/introducing-gpt-5/  
+    #  S5 — OpenAI: Introducing GPT-4.1 in the API (capabilities & SWE-bench Verified) — https://openai.com/index/gpt-4-1/  
+    #  S6 — OpenAI: GPT-4.1 long-context details (up to 1M tokens) — https://openai.com/index/gpt-4-1/#long-context  
+    #  S7 — Artificial Analysis: GPT-4.1 (Providers view; TTFT/output speed) — https://artificialanalysis.ai/models/gpt-4-1/providers  
+    #  S8 — Mistral Docs: Models Overview (incl. mistral-medium-2505/2508, codestral-2508) — https://docs.mistral.ai/getting-started/models/models_overview/  
+    #  S9 — Mistral Blog: “Large Enough” (Mistral Large 2; 128k context, positioning) — https://mistral.ai/news/mistral-large-2407  
     # S10 — Mistral Blog: Codestral 25.01 announcement — https://mistral.ai/news/codestral-2501  
     # S11 — Artificial Analysis: Mistral Large 2 (quality/price/speed aggregates) — https://artificialanalysis.ai/models/mistral-large-2  
     # S12 — Artificial Analysis: o3-mini (speed/latency metrics) — https://artificialanalysis.ai/models/o3-mini  
@@ -521,13 +543,13 @@ class LLMs:
     # ------------------------------------------------------------------------------
     _DEFAULT_PRICE_OVERRIDES_PER_1M: dict[str, tuple[float, float]] = {
         # name -> (input_usd_per_million, output_usd_per_million)
-        "ollama/qwen2.5-coder:1.5b-base": (0.0, 0.0),
-        "ollama/qwen2.5-coder:3b-base"  : (0.0, 0.0),
-        "ollama/codegemma:2b-code"      : (0.0, 0.0),
-        "ollama/starcoder2:3b"          : (0.0, 0.0),
-        "ollama/granite-code:3b"        : (0.0, 0.0),
-        "ollama/phi3.5:3.8b"            : (0.0, 0.0),
-        "ollama/llama3:8b"              : (0.0, 0.0),
+        "ollama/qwen2.5-coder:1.5b-base" : (0.0, 0.0),
+        "ollama/qwen2.5-coder:3b-base"   : (0.0, 0.0),
+        "ollama/codegemma:2b-code"       : (0.0, 0.0),
+        "ollama/starcoder2:3b"           : (0.0, 0.0),
+        "ollama/granite-code:3b"         : (0.0, 0.0),
+        "ollama/phi3.5:3.8b"             : (0.0, 0.0),
+        "ollama/llama3:8b"               : (0.0, 0.0),
     }
 
     # Provider -> required env var
@@ -693,7 +715,8 @@ class LLMs:
 
         def performance_then_price(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
             """Highest performance score, then cheapest among those."""
-            def key(m: ModelInfo):
+            def key(m: ModelInfo) -> tuple[float, float]:
+                """Key function for performance-then-price strategy."""
                 return (-m.performance_score, m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
             return min(cands, key=key)
 
@@ -702,14 +725,14 @@ class LLMs:
             cfg = self._config or LLMConfig()
 
             # Group stats for normalization
-            costs = [m.estimate_cost(cfg.assumed_prompt_tokens, cfg.assumed_output_tokens) for m in cands]
+            costs    = [m.estimate_cost(cfg.assumed_prompt_tokens, cfg.assumed_output_tokens) for m in cands]
             max_cost = max(costs) if costs else 1.0
 
-            ttfts = [m.ttft_ms for m in cands if m.ttft_ms is not None]
+            ttfts    = [m.ttft_ms for m in cands if m.ttft_ms is not None]
             max_ttft = max(ttfts) if ttfts else 1.0
 
             tps_vals = [m.tps for m in cands if m.tps is not None]
-            max_tps = max(tps_vals) if tps_vals else 1.0
+            max_tps  = max(tps_vals) if tps_vals else 1.0
 
             def key(m: ModelInfo) -> float:
                 """Key function for multi-objective optimization."""
@@ -731,7 +754,7 @@ class LLMs:
                 else:
                     tps_pen = 1.0  # unknown TPS
 
-                code_pen = 1.0 - (m.code_skill if m.code_skill is not None else _DEFAULT_MODEL_SKILL)
+                code_pen = 1.0 - (m.code_skill    if m.code_skill    is not None else _DEFAULT_MODEL_SKILL)
                 gen_pen  = 1.0 - (m.general_skill if m.general_skill is not None else _DEFAULT_MODEL_SKILL)
                 nonlocal_pen = 0.0 if m.is_local else 1.0
 
@@ -819,10 +842,8 @@ class LLMs:
             try:
                 resp = litellm.completion(
                     model=model,
-                    messages=[
-                        {"role": "system", "content": system_message},
-                        {"role": "user",   "content": prompt},
-                    ],
+                    messages=[{"role": "system", "content": system_message},
+                              {"role": "user",   "content": prompt}],
                     temperature=temperature,
                     max_tokens=max_tokens,
                     **extra
@@ -839,10 +860,8 @@ class LLMs:
             response_obj = self.clients["OpenAI"].chat.completions.create(
                 model=model,
                 temperature=temperature,
-                messages=[
-                    {"role": "system", "content": system_message},
-                    {"role": "user",   "content": prompt}
-                ]
+                messages=[{"role": "system", "content": system_message},
+                          {"role": "user",   "content": prompt}],
             )
             return response_obj.choices[0].message.content
         elif company == "Anthropic":
@@ -1007,6 +1026,7 @@ class LLMs:
         )
 
     def _ensure_litellm(self) -> None:
+        """Ensure LiteLLM is imported and ready to use."""
         if self._litellm_ready:
             return
         try:
@@ -1422,27 +1442,27 @@ def my_fopen(file_path: str | os.PathLike[str], suppress_errors: bool = False,
         return False
     # Does the file end with any of these (non-text) extensions?
     # Join all suffixes because some listed extensions look like ".tar.gz"
-    if "".join(file_path.suffixes).casefold() in video_extensions:
+    if "".join(file_path.suffixes).casefold() in VIDEO_EXTENSIONS:
         if not rawlog:
             if not suppress_errors: logging.error("Skipping video file %s", file_path)
             else:                   logging.info( "Skipping video file %s", file_path)
         return False
-    if "".join(file_path.suffixes).casefold() in audio_extensions:
+    if "".join(file_path.suffixes).casefold() in AUDIO_EXTENSIONS:
         if not rawlog:
             if not suppress_errors: logging.error("Skipping audio file %s", file_path)
             else:                   logging.info( "Skipping audio file %s", file_path)
         return False
-    if "".join(file_path.suffixes).casefold() in image_extensions:
+    if "".join(file_path.suffixes).casefold() in IMAGE_EXTENSIONS:
         if not rawlog:
             if not suppress_errors: logging.error("Skipping image file %s", file_path)
             else:                   logging.info( "Skipping image file %s", file_path)
         return False
-    if "".join(file_path.suffixes).casefold() in archive_extensions:
+    if "".join(file_path.suffixes).casefold() in ARCHIVE_EXTENSIONS:
         if not rawlog:
             if not suppress_errors: logging.error("Skipping archive file %s", file_path)
             else:                   logging.info( "Skipping archive file %s", file_path)
         return False
-    for encoding in text_encodings:
+    for encoding in TEXT_ENCODINGS:
         try:
             with open(file_path, 'r', encoding=encoding) as file:
                 if numlines is None:
@@ -1927,12 +1947,13 @@ def find_additional_alias_files(options: Options) -> None:
     options.additional_alias_files = valid_files
 
 
-def ensure_path_is_a_file(path: str | os.PathLike[str]) -> Path:
+def ensure_path_is_a_file(path: str | os.PathLike[str], raise_on_empty: bool = False) -> Path:
     """
     Ensure that the given path is an existing file and return it as a Path object.
     
     Args:
-        path: The path to check.
+        path:           The path to check.
+        raise_on_empty: If True, raise an exception if the file is empty.
 
     Returns:
         A Path object representing the file.
@@ -1944,7 +1965,10 @@ def ensure_path_is_a_file(path: str | os.PathLike[str]) -> Path:
     if not p.is_file():
         raise IsADirectoryError(f"Expected a file, got directory: {p}")
     if p.stat().st_size == 0:
-        logging.warning("File is empty: %s", p)
+        if raise_on_empty:
+            raise ValueError(f"File is empty: {p}")
+        else:
+            logging.warning("File is empty: %s", p)
     return p
 
 
@@ -3248,7 +3272,7 @@ def filename_format(text: str, sep: str = "_", max_length: int = None) -> str:
     Turn arbitrary text into an ASCII-only, filesystem‐safe base filename.
     WARNING: Do not include an extension in the text, because this function
     might remove the dot which separates the filename from the extension.
-    It attempts to recognize and remove extensions listed in all_known_extensions
+    It attempts to recognize and remove extensions listed in ALL_KNOWN_EXTENSIONS
     but this list is not exhaustive.
 
     Steps:
@@ -3286,7 +3310,7 @@ def filename_format(text: str, sep: str = "_", max_length: int = None) -> str:
 
     # List of common extensions to recognize and (temporarily) remove
     removed_ext = ""
-    for ext in all_known_extensions:
+    for ext in ALL_KNOWN_EXTENSIONS:
         if text.casefold().endswith(ext):
             text = text[:-len(ext)]
             removed_ext = ext
@@ -3297,7 +3321,7 @@ def filename_format(text: str, sep: str = "_", max_length: int = None) -> str:
     #    e.g. "hello.world--foo_bar" → "hello world--foo bar"
     text = re.sub(r"[._\s]+", sep, text)
 
-    # Remove anything but dashes, a–z, 0–9, or our sep
+    # Remove anything but dashes, A-Z, a–z, 0–9, or our sep
     allowed = f"-A-Za-z0-9{re.escape(sep)}"
     text = re.sub(fr"[^{allowed}]+", "", text)
 
@@ -3329,7 +3353,8 @@ def if_filepath_then_read(input_string_or_filepath: str | os.PathLike[str],
 
     Args:
         input_string_or_filepath: The source can be a file path or a string.
-        force_string:             If True, treat 'input_string_or_filepath' as a string even if it looks like a file path.
+        force_string:             If True, treat 'input_string_or_filepath' as a string even if
+                                  it looks like a file path.
 
     Returns:
         str : The contents of the file if input_string_or_filepath is a file path,
@@ -3343,6 +3368,9 @@ def if_filepath_then_read(input_string_or_filepath: str | os.PathLike[str],
     # If so, read the file contents.
     if force_string and isinstance(input_string_or_filepath, os.PathLike):
         raise TypeError(f"'input_string_or_filepath' was given as a file path ({input_string_or_filepath!r}) but 'force_string' is True, so it cannot be treated as a file path.")
+    # Heuristics: if it contains newlines or is ridiculously long, it's source.
+    if isinstance(input_string_or_filepath, str) and ("\n" in input_string_or_filepath or len(input_string_or_filepath) > 4096):
+        return input_string_or_filepath
     if not force_string and Path(input_string_or_filepath).is_file():
         file_path = Path(input_string_or_filepath)
         try:
@@ -4152,7 +4180,7 @@ def is_python_script(path: str | os.PathLike[str]) -> bool:
         return False
 
     # Common extensions
-    if path.suffix.casefold() in python_extensions:
+    if path.suffix.casefold() in PYTHON_EXTENSIONS:
         return True
 
     # No-extension scripts: check for executable bit + python shebang
@@ -4218,7 +4246,7 @@ def diff_and_confirm(orig_text: str, changed_text: str, path: str | os.PathLike[
     if ans in ("y", "yes"):
         # If the user hasn't chosen to skip compilation and this is a Python script,
         # try to compile the changed text before writing it. If compilation fails, abort the write.
-        if not skip_compile and is_python_script(path) and not compile_code(changed_text):
+        if not skip_compile and is_python_script(path) and not compile_code(changed_text, force_source=True):
             logging.error(f"{ANSI_RED}Failed to compile the changed python script. Aborting write.{ANSI_RESET}")
             return False  # Don't write if it won't compile, and don't continue.
         path.write_text(changed_text, encoding=DEFAULT_ENCODING)
@@ -4518,8 +4546,8 @@ class Options:
 def parse_arguments(options: Options) -> None:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Diff two files using ud.my_diff().")
-    parser.add_argument("orig_path", type=str, help="Path to original file.")
-    parser.add_argument("changed_path", type=str, help="Path to changed file.")
+    parser.add_argument("orig_path", type=Path, help="Path to original file.")
+    parser.add_argument("changed_path", type=Path, help="Path to changed file.")
     parser.add_argument("--diff_choice", type=int, default=1,
                         help="0 = old-style diff, 1 = unified diff with 0 context lines, "
                              "2+ = unified diff with 'diff_choice - 1' context lines")
@@ -4591,7 +4619,7 @@ class Options:
 def parse_arguments(options: Options) -> None:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Check Python formatting in a file.")
-    parser.add_argument("filepath", type=str, help="Path to the Python file to check")
+    parser.add_argument("filepath", type=Path, help="Path to the Python file to check")
     parser.add_argument("--diff_choice", type=int, default=1,
                         help="0 = old-style diff, 1 = unified diff with 0 context lines, "
                              "2+ = unified diff with 'diff_choice - 1' context lines")
@@ -4660,11 +4688,11 @@ def parse_arguments(options: Options) -> None:
                         help="The text to be replaced in the files.")
     parser.add_argument("new_str",
                         help="The text to replace the old_str.")
-    parser.add_argument("glob_pattern", nargs="?", default=options.default_glob_pattern,
+    parser.add_argument("glob_pattern", nargs="?", default=options.default_glob_pattern, metavar="GLOB",
                         help=f'Glob pattern of files to edit (default: "{options.default_glob_pattern}"). Example: "*.py"')
-    parser.add_argument("-dir", "-d", default=options.default_dir,
+    parser.add_argument("--dir", "-d", type=Path, default=options.default_dir, metavar="DIR",
                         help=f"Directory to search in (defaults to current working directory: {options.default_dir}).")
-    parser.add_argument("-recursive", "-r", action="store_true",
+    parser.add_argument("--recursive", "-r", action="store_true",
                         help="Search recursively in subdirectories.")
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("-debug", "--debug", action="store_true",
@@ -4689,6 +4717,8 @@ if __name__ == "__main__":
     main()
 '''
 
+DEFAULT_EXCLUDE_DIRS: set[str] = {".git", "__pycache__", ".venv", "venv", "build", "dist"}
+
 TREEVIEW_SCRIPT: str = r'''#!/usr/bin/env python3
 from __future__ import annotations
 
@@ -4700,7 +4730,7 @@ from pathlib import Path
 import univ_defs_sys_path_script  # Appends sys.path with the location of univ_defs.py
 import univ_defs as ud
 
-__version__: str = "0.1.0"
+__version__: str = "0.1.1"
 
 
 class Options:
@@ -4708,23 +4738,27 @@ class Options:
 
     def __init__(self) -> None:
         """Initialize the Options class with default values."""
-        self.my_name:  str = Path(sys.argv[0]).stem  # The invoked name of this script without the .py extension
-        self.log_mode: int = logging.INFO  # Use the -debug command line argument to change to DEBUG.
+        self.my_name:                    str = Path(sys.argv[0]).stem  # The invoked name of this script without the .py extension
+        self.default_exclude_dirs:  set[str] = set(ud.DEFAULT_EXCLUDE_DIRS)
+        self.default_dir:               Path = Path.cwd()  # Default to current working directory
+        self.log_mode:                   int = logging.INFO  # Use the -debug command line argument to change to DEBUG.
         self.args: argparse.Namespace | None = None
-        self.default_dir: Path = Path.cwd()  # Default to current working directory
 
 
 def parse_arguments(options: Options) -> None:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Print a tree view of the specified directory.")
-    parser.add_argument("dir", default=options.default_dir, nargs="?",
+    parser.add_argument("directory", type=Path, nargs="?", default=options.default_dir,
                         help=f"Directory to search in (defaults to current working directory: {options.default_dir}).")
-    parser.add_argument("-no_colors", action="store_true",
+    parser.add_argument("--no-colors", action="store_true",
                         help="Do not use colors in the output.")
+    parser.add_argument("--exclude-dirs", action="extend", nargs="+", default=None,
+                        help=f"Directory name to exclude (can be given multiple times). Any directories given will be added to the default set: {sorted(options.default_exclude_dirs)}")
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("-debug", "--debug", action="store_true",
                         help="Enable DEBUG logging.")
     options.args = parser.parse_args()
+    options.args.exclude_dirs = set(ud.DEFAULT_EXCLUDE_DIRS) | set(options.args.exclude_dirs or [])
     if options.args.debug:
         options.log_mode = logging.DEBUG
 
@@ -4735,8 +4769,13 @@ def main() -> None:
     parse_arguments(options)
     memory_handler = ud.configure_logging(options.my_name, log_level=options.log_mode,
                                           rawlog=True)
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Directory: %s", options.args.dir)
-    ud.treeview_new_files(options.args.dir, use_colors=not options.args.no_colors)
+    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Directory: %s", options.args.directory)
+    state = {
+        "excluded_dirs"   : options.args.exclude_dirs,
+        "already_printed" : set(),
+        "my_filepath"     : Path(__file__).expanduser().resolve(),
+    }
+    ud.treeview_new_files(options.args.directory, use_colors=not options.args.no_colors, state=state)
     ud.print_all_errors(memory_handler)
     logging.shutdown()
 
@@ -4758,7 +4797,10 @@ from typing import Iterable
 
 import tokenize  # stdlib
 
-__version__: str = "0.1.0"
+import univ_defs_sys_path_script  # Appends sys.path with the location of univ_defs.py
+import univ_defs as ud
+
+__version__: str = "0.1.1"
 
 
 class Options():
@@ -4766,9 +4808,9 @@ class Options():
 
     def __init__(self) -> None:
         """Initialize the Options class with default values."""
-        self.my_name:  str = Path(sys.argv[0]).stem  # The invoked name of this script without the extension
-        self.default_exclude_dirs: list[str] = [".git", "__pycache__", ".venv", "venv", "build", "dist"]
-        self.log_mode: int = logging.INFO  # Use -debug to change to logging.DEBUG.
+        self.my_name:                    str = Path(sys.argv[0]).stem  # The invoked name of this script without the extension
+        self.default_exclude_dirs:  set[str] = set(ud.DEFAULT_EXCLUDE_DIRS)
+        self.log_mode:                   int = logging.INFO  # Use -debug to change to logging.DEBUG.
         self.args: argparse.Namespace | None = None
 
 
@@ -4776,24 +4818,24 @@ def parse_arguments(options: Options) -> None:
     """
     Parse command-line arguments.
     """
-    p = argparse.ArgumentParser(description="Search Python files and print full logical statements that match a pattern.")
-    p.add_argument("paths", nargs="+", type=Path,  # parse as Path at the boundary
-                   help="Files and/or directories to search.")
-    p.add_argument("-p", "--pattern", required=True, help="Search pattern (string or regex).")
-    p.add_argument("-E", "--regex", action="store_true",
-                   help="Treat the pattern as a regular expression.")
-    p.add_argument("-i", "--ignore-case", action="store_true", help="Case-insensitive match.")
-    p.add_argument("-n", "--line-numbers", action="store_true",
-                   help="Show line numbers in output blocks.")
-    p.add_argument("-r", "--recursive", action="store_true", help="Recurse into directories.")
-    p.add_argument("--no-glob", action="store_true",
-                   help="Do not automatically filter for *.py inside directories.")
-    p.add_argument("--exclude-dir", action="append",
-                   default=options.default_exclude_dirs,
-                   help=f"Directory name to exclude (can be given multiple times). Default: {options.default_exclude_dirs}")
-    p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
-    p.add_argument("-debug", "--debug", action="store_true", help="Enable debug logging.")
-    options.args = p.parse_args()
+    parser = argparse.ArgumentParser(description="Search Python files and print full logical statements that match a pattern.")
+    parser.add_argument("paths", nargs="+", type=Path,  # parse as Path at the boundary
+                        help="Files and/or directories to search.")
+    parser.add_argument("-p", "--pattern", required=True, help="Search pattern (string or regex).")
+    parser.add_argument("-E", "--regex", action="store_true",
+                        help="Treat the pattern as a regular expression.")
+    parser.add_argument("-i", "--ignore-case", action="store_true", help="Case-insensitive match.")
+    parser.add_argument("-n", "--line-numbers", action="store_true",
+                        help="Show line numbers in output blocks.")
+    parser.add_argument("-r", "--recursive", action="store_true", help="Recurse into directories.")
+    parser.add_argument("--no-glob", action="store_true",
+                        help="Do not automatically filter for *.py inside directories.")
+    parser.add_argument("--exclude-dirs", action="extend", nargs="+", default=None,
+                        help=f"Directory name to exclude (can be given multiple times). Any directories given will be added to the default set: {sorted(options.default_exclude_dirs)}")
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("-debug", "--debug", action="store_true", help="Enable debug logging.")
+    options.args = parser.parse_args()
+    options.args.exclude_dirs = set(ud.DEFAULT_EXCLUDE_DIRS) | set(options.args.exclude_dirs or [])
     if options.args.debug:
         options.log_mode = logging.DEBUG
 
@@ -4806,7 +4848,7 @@ def _is_excluded(path: Path, excluded: set[str]) -> bool:
 
 def iter_files(paths: Iterable[str | os.PathLike[str]],
                recursive: bool,
-               exclude_dirs: list[str],
+               excluded: set[str],
                only_py: bool) -> Iterable[Path]:
     """
     Yield files from given paths, respecting recursion and directory excludes.
@@ -4814,7 +4856,6 @@ def iter_files(paths: Iterable[str | os.PathLike[str]],
     Parameters that represent paths accept str | os.PathLike[str] at the boundary.
     Returned paths are pathlib.Path instances.
     """
-    excluded = set(exclude_dirs)
     pattern = "*.py" if only_py else "*"
 
     for raw in paths:
@@ -4987,7 +5028,7 @@ def main() -> None:
     any_hits = False
 
     for file in iter_files(options.args.paths, options.args.recursive,
-                           options.args.exclude_dir, only_py=not options.args.no_glob):
+                           options.args.exclude_dirs, only_py=not options.args.no_glob):
         results = search_file(file, options.args.pattern, regex=options.args.regex,
                               ignore_case=options.args.ignore_case,
                               show_line_numbers=options.args.line_numbers)
@@ -5437,7 +5478,7 @@ def treeview_new_files(directory:      str | os.PathLike[str],
             if subdir.name not in excluded_dirs and subdir.expanduser().resolve() not in already_printed:
                 treeview_new_files(subdir, last_file_path=last_file_path, last_mtime=last_mtime,
                                    maxlines=maxlines, use_colors=use_colors, prefix=child_prefix,
-                                   is_last=is_sub_last, level=level + 1)
+                                   is_last=is_sub_last, level=level + 1, state=state)
 
         # Print relevant files next
         for i, file_entry in enumerate(relevant_entries):
@@ -5490,10 +5531,13 @@ def open_terminal_and_run_command(the_command: str, close_after: bool = False,
     import subprocess
     fallback_logging_config()
     logging.info("Opening terminal and running '%s'...", the_command)
-    terminal_args = ['gnome-terminal']
-    if maximize_window:
-        # either of these works; here we use both for clarity
-        terminal_args += ['--window', '--maximize']
+    if sys.platform.startswith("linux"):
+        terminal_args = ['gnome-terminal']
+    else:
+        raise NotImplementedError(f"The function {return_method_name()} is only implemented for Linux, not for {sys.platform}")
+    # if maximize_window:  # Disabled because in Ubuntu this causes the title bar to disappear.
+    #     # either of these works; here we use both for clarity
+    #     terminal_args += ['--window', '--maximize']
     # Now tell bash to run the command, then exit or hand off to an interactive shell
     if close_after:
         bash_cmd = f'{the_command}; exit'
@@ -5501,6 +5545,40 @@ def open_terminal_and_run_command(the_command: str, close_after: bool = False,
         bash_cmd = f'{the_command}; exec bash'
     terminal_args += ['--', 'bash', '-ic', bash_cmd]
     subprocess.Popen(terminal_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+# FIX PROBLEM WITH MAXIMIZING: https://chatgpt.com/share/68bcd45e-a2fc-8006-aeba-50dd177f1da6
+# ALSO, ON STARTUP, TERMINAL WINDOWS CLOSE IMMEDIATELY AFTER I CTRL-C THEM EVEN IF close_after=False
+# POSSIBLY RELATED: https://askubuntu.com/questions/1409826/gnome
+# def open_terminal_and_run_command(cmd, close_after=False, keep_titlebar=True):
+#     import subprocess, time
+#     bash_cmd = f'{cmd}; exit' if close_after else f'{cmd}; exec bash'
+#     # Start *not* maximized:
+#     p = subprocess.Popen(['gnome-terminal', '--class=myterm', '--', 'bash', '-ic', bash_cmd])
+#     if keep_titlebar:
+#         time.sleep(0.3)  # small delay so the window exists
+#         # On X11: maximize after mapping (keeps decorations)
+#         subprocess.run(['wmctrl', '-x', '-r', 'myterm', '-b', 'add,maximized_vert,maximized_horz'], check=False)
+
+
+def get_effective_free_memory() -> float:
+    """Return the "effective" free memory in bytes: free memory plus buffers plus cache."""
+    if sys.platform.startswith("linux"):
+        # NOTE: If your kernel supports MemAvailable, you could use that instead for a more accurate measure of usable memory
+        info = {}
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                parts     = line.split()
+                key       = parts[0].rstrip(":")
+                value_kb  = int(parts[1])
+                info[key] = value_kb
+
+        mem_free_kb = info.get("MemFree", 0)
+        buffers_kb  = info.get("Buffers", 0)
+        cached_kb   = info.get("Cached",  0)
+
+        effective_free_memory = (mem_free_kb + buffers_kb + cached_kb) * 1024
+    else:
+        raise NotImplementedError(f"The function {return_method_name()} is only implemented for Linux, not for {sys.platform}")
+    return effective_free_memory
 
 
 def kill_process(pname: str) -> None:
@@ -5577,8 +5655,10 @@ def open_filemanager_with_dirs(directories: list[str | os.PathLike[str]]) -> Non
     import subprocess
     import time
     fallback_logging_config()
-    if not sys.platform.startswith('linux'):
-        logging.error(f"The function {return_method_name()} is only implemented for Linux systems.")
+    if sys.platform.startswith('linux'):
+        filemanager_command = "nemo"
+    else:
+        logging.error(f"The function {return_method_name()} is only implemented for Linux systems, not for {sys.platform}")
         return
     logging.info("Opening file manager with specified directories...")
     for directory in directories:
@@ -5592,7 +5672,8 @@ def open_filemanager_with_dirs(directories: list[str | os.PathLike[str]]) -> Non
         if not directory.exists():
             logging.error(f"Directory {directory} does not exist. Skipping.")
             continue
-        subprocess.Popen(['nemo', directory], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen([filemanager_command, directory], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
         # Optional: Wait briefly between opening directories
         time.sleep(0.5)
 
@@ -5969,143 +6050,277 @@ def combine_html_files(file_paths: list[str | os.PathLike[str]],
     logging.info("Saved combined HTML to '%s'.", output_file_path)
 
 
-def check_list_for_duplicates(the_list: list) -> bool:
-    """Check a list for duplicate elements and return True if duplicates are found."""
+# Map these to spaces (treat like separators)
+characters_to_space = '._-'
+replace_with_space = ' ' * len(characters_to_space)
+# Delete these outright (quotes of various kinds)
+# Include double quote, apostrophe, backtick. Thanks to unidecode(),
+# curly/angle quotes become ASCII quotes and will be removed too.
+quotes_to_delete = "\"'`"
+translation_table = str.maketrans(characters_to_space, replace_with_space, quotes_to_delete)
+def normalize_for_search(text: str) -> str:
+    """Convert text to ASCII and lowercase for case- and diacritic-insensitive comparison. Also treat some characters such as ._- the same as spaces. Remove quotes (', ", ` and their unicode variants)."""
+    from unidecode import unidecode
+    return unidecode(text).casefold().translate(translation_table)
+
+
+def calculate_checksum(file_path: str | os.PathLike[str]) -> str:
+    """Calculate the SHA256 checksum of a file."""
+    import hashlib
+    sha256_hash = hashlib.sha256()
+    with file_path.open("rb") as f:
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
+
+
+def check_list_for_duplicates(the_list: list) -> None:
+    """Check a list for duplicate elements."""
     duplicates = [ext for ext in set(the_list) if the_list.count(ext) > 1]
-    print("Duplicates:", duplicates)
-    return len(duplicates) > 0
+    if duplicates:
+        print("Duplicates:", duplicates)
 
 
 # A comprehensive list of encodings to try when reading files, with most likely encodings first.
-text_encodings: list[str] = [
-    'utf-8',        'latin-1',      'ascii',          'iso-8859-1',      'big5',         'utf-8-sig',
-    'utf-16',       'utf-16-be',    'utf-16-le',      'utf-32',          'utf-32-be',    'utf-32-le',
-    'cp1252',       'cp1251',       'cp1250',         'cp1253',          'cp1254',       'cp1255',
-    'cp1256',       'cp1257',       'cp1258',         'iso-8859-2',      'iso-8859-3',   'iso-8859-4',
-    'iso-8859-5',   'iso-8859-6',   'iso-8859-7',     'iso-8859-8',      'iso-8859-9',   'iso-8859-10',
-    'iso-8859-11',  'iso-8859-13',  'iso-8859-14',    'iso-8859-15',     'iso-8859-16',  'cp437',
-    'cp850',        'cp852',        'cp855',          'cp857',           'cp858',        'cp860',
-    'cp861',        'cp862',        'cp863',          'cp864',           'cp865',        'cp866',
-    'cp869',        'cp037',        'cp424',          'cp500',           'cp720',        'cp737',
-    'cp775',        'cp874',        'cp875',          'cp932',           'cp949',        'cp950',
-    'cp1006',       'cp1026',       'cp1125',         'cp1140',          'big5hkscs',    'gb2312',
-    'gbk',          'gb18030',      'euc-jp',         'euc-jis-2004',    'euc-jisx0213', 'euc-kr',
-    'iso2022-jp',   'iso2022-jp-1', 'iso2022-jp-2',   'iso2022-jp-2004', 'iso2022-jp-3', 'iso2022-jp-ext',
-    'iso2022-kr',   'johab',        'koi8-r',         'koi8-t',          'koi8-u',       'kz1048',
-    'mac-cyrillic', 'mac-greek',    'mac-iceland',    'mac-latin2',      'mac-roman',    'mac-turkish',
-    'ptcp154',      'shift-jis',    'shift-jis-2004', 'shift-jisx0213',  'hz',           'tis-620',
-    'euc-tw',       'iso2022-tw'
+TEXT_ENCODINGS: list[str] = [
+    "utf-8",           "latin-1",        "ascii",           "iso-8859-1",         "big5",
+    "utf-8-sig",       "utf-16",         "utf-16-be",       "utf-16-le",          "utf-32",
+    "utf-32-be",       "utf-32-le",      "cp1252",          "cp1251",             "cp1250",
+    "cp1253",          "cp1254",         "cp1255",          "cp1256",             "cp1257",
+    "cp1258",          "iso-8859-2",     "iso-8859-3",      "iso-8859-4",         "iso-8859-5",
+    "iso-8859-6",      "iso-8859-7",     "iso-8859-8",      "iso-8859-9",         "iso-8859-10",
+    "iso-8859-11",     "iso-8859-13",    "iso-8859-14",     "iso-8859-15",        "iso-8859-16",
+    "cp437",           "cp850",          "cp852",           "cp855",              "cp857",
+    "cp858",           "cp860",          "cp861",           "cp862",              "cp863",
+    "cp864",           "cp865",          "cp866",           "cp869",              "cp037",
+    "cp424",           "cp500",          "cp720",           "cp737",              "cp775",
+    "cp874",           "cp875",          "cp932",           "cp949",              "cp950",
+    "cp1006",          "cp1026",         "cp1125",          "cp1140",             "big5hkscs",
+    "gb2312",          "gbk",            "gb18030",         "euc-jp",             "euc-jis-2004",
+    "euc-jisx0213",    "euc-kr",         "iso2022-jp",      "iso2022-jp-1",       "iso2022-jp-2",
+    "iso2022-jp-2004", "iso2022-jp-3",   "iso2022-jp-ext",  "iso2022-kr",         "johab",
+    "koi8-r",          "koi8-t",         "koi8-u",          "kz1048",             "mac-cyrillic",
+    "mac-greek",       "mac-iceland",    "mac-latin2",      "mac-roman",          "mac-turkish",
+    "ptcp154",         "shift-jis",      "shift-jis-2004",  "shift-jisx0213",     "hz",
+    "tis-620",         "utf-7",          "base64",          "bz2",                "charmap",
+    "cp273",           "cp856",          "euc_jis_2004",    "euc_jisx0213",       "euc_jp",
+    "euc_kr",          "hex",            "hp-roman8",       "idna",               "iso2022_jp",
+    "iso2022_jp_1",    "iso2022_jp_2",   "iso2022_jp_2004", "iso2022_jp_3",       "iso2022_jp_ext",
+    "iso2022_kr",      "iso8859-1",      "iso8859-10",      "iso8859-11",         "iso8859-13",
+    "iso8859-14",      "iso8859-15",     "iso8859-16",      "iso8859-2",          "iso8859-3",
+    "iso8859-4",       "iso8859-5",      "iso8859-6",       "iso8859-7",          "iso8859-8",
+    "iso8859-9",       "mac-arabic",     "mac-croatian",    "mac-farsi",          "mac-romanian",
+    "palmos",          "punycode",       "quopri",          "raw-unicode-escape", "rot-13",
+    "shift_jis",       "shift_jis_2004", "shift_jisx0213",  "unicode-escape",     "uu",
+    "zlib",
 ]
-text_encodings = [e.casefold() for e in text_encodings]  # Just in... case.
-# check_list_for_duplicates(text_encodings) # Run this after adding new extensions to ensure there are no duplicates.
+# # Examine encodings for any uppercase characters.
+# for enc in TEXT_ENCODINGS:
+#     if any(c.isupper() for c in enc):
+#         raise ValueError(f"Encoding '{enc}' contains uppercase characters. All encodings should be lowercase.")
+# check_list_for_duplicates(TEXT_ENCODINGS) # Run this after adding new encodings to ensure there are no duplicates.
+# def all_encodings() -> list[str]:
+#     """Return a sorted list of all known Python text encodings."""
+#     import pkgutil, encodings, codecs
+#     from encodings.aliases import aliases as alias_map
+#     names = set()
+#     # 1) Try every module under encodings/
+#     for m in pkgutil.iter_modules(encodings.__path__):
+#         try:
+#             names.add(codecs.lookup(m.name).name)
+#         except LookupError:
+#             # Skip helpers like 'aliases' or any non-codec modules
+#             pass
+#     # 2) Try all alias keys and targets
+#     for n in set(alias_map) | set(alias_map.values()):
+#         try:
+#             names.add(codecs.lookup(n).name)
+#         except LookupError:
+#             # Skip platform-specific codecs not present here (e.g., 'mbcs' on Linux/macOS)
+#             pass
+#     return sorted(names)
+# # Example usage
+# encs = all_encodings()
+# print(len(encs), "encodings found")
+# print(encs[:25])  # peek
+# def invalid_encodings(names: list[str]) -> list[str]:
+#     """Return a list of invalid encoding names from the given list."""
+#     import codecs
+#     bad = []
+#     for n in names:
+#         try:
+#             codecs.lookup(n)
+#         except LookupError:
+#             bad.append(n)
+#     return bad
+# bad = invalid_encodings(TEXT_ENCODINGS)
+# print("Invalid encodings:", bad)
+# missing_encodings = []
+# for enc in encs:
+#     if enc not in TEXT_ENCODINGS:
+#         missing_encodings.append(enc)
+# print(f"{len(missing_encodings)} encodings are missing from TEXT_ENCODINGS: {missing_encodings}")
 
 # A comprehensive list of python extensions.
-python_extensions: list[str] = ['.py', '.pyw']
-python_extensions = [e.casefold() for e in python_extensions]  # Just in... case.
+PYTHON_EXTENSIONS: list[str] = [".py", ".pyw"]
 
 # A comprehensive list of text file extensions.
-text_extensions: list[str] = [
-    '.txt',  '.html',     '.htm',      '.csv',        '.json', '.xml'
-    '.adoc', '.asciidoc', '.bib',      '.cfg',        '.conf', '.ini',
-    '.log',  '.md',       '.markdown', '.properties', '.rtf',  '.rst',
-    '.sgm',  '.sgml',     '.tex',      '.toml',       '.tsv',  '.xhtml',
-    '.yaml', '.yml',
+TEXT_EXTENSIONS: list[str] = [
+    ".txt",          ".html",     ".htm",      ".csv",        ".json",       ".xml",
+    ".adoc",         ".asciidoc", ".bib",      ".cfg",        ".conf",       ".ini",
+    ".log",          ".md",       ".markdown", ".properties", ".rtf",        ".rst",
+    ".sgm",          ".sgml",     ".tex",      ".toml",       ".tsv",        ".xhtml",
+    ".yaml",         ".yml",      ".svg",      ".rss",        ".atom",       ".opml",
+    ".xsd",          ".dtd",      ".xsl",      ".xslt",       ".xaml",       ".kml",
+    ".gpx",          ".mml",      ".jsonl",    ".ndjson",     ".geojson",    ".topojson",
+    ".ipynb",        ".gltf",     ".mdx",      ".rmd",        ".org",        ".textile",
+    ".wiki",         ".mkd",      ".mkdn",     ".mdown",      ".mmd",        ".ltx",
+    ".sty",          ".cls",      ".dtx",      ".aux",        ".toc",        ".env",
+    ".editorconfig", ".desktop",  ".service",  ".hcl",        ".tf",         ".tfvars",
+    ".proto",        ".graphql",  ".gql",      ".cue",        ".rego",       ".edn",
+    ".cff",          ".tab",      ".psv",      ".ltsv",       ".css",        ".js",
+    ".mjs",          ".cjs",      ".ts",       ".tsx",        ".jsx",        ".ejs",
+    ".erb",          ".pug",      ".mustache", ".hbs",        ".handlebars", ".jinja",
+    ".jinja2",       ".njk",      ".twig",     ".liquid",     ".sh",         ".bash",
+    ".zsh",          ".fish",     ".bat",      ".cmd",        ".ps1",        ".c",
+    ".h",            ".cpp",      ".hpp",      ".java",       ".kt",         ".kts",
+    ".cs",           ".go",       ".rs",       ".swift",      ".py",         ".rb",
+    ".php",          ".pl",       ".lua",      ".r",          ".jl",         ".m",
+    ".diff",         ".patch",    ".err",      ".out",        ".po",         ".pot",
+    ".ics",          ".vcf",      ".vcard",    ".srt",        ".vtt",        ".ass",
+    ".ssa",          ".lrc",      ".dot",      ".gv",         ".mermaid",    ".sgf",
+    ".pgn",          ".sfv",      ".md5",      ".sha1",       ".sha256",
 ]
-text_extensions = [e.casefold() for e in text_extensions]  # Just in... case.
-# check_list_for_duplicates(text_extensions) # Run this after adding new extensions to ensure there are no duplicates.
+# check_list_for_duplicates(TEXT_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
 # A comprehensive list of video file extensions.
-video_extensions: list[str] = [
-    '.mp4',   '.mkv',   '.mov',   '.avi',  '.mpg',  '.mpeg',
-    '.wmv',   '.m4v',   '.flv',   '.divx', '.vob',  '.iso',
-    '.3gp',   '.webm',  '.mts',   '.m2ts', '.ts',   '.ogv',
-    '.rm',    '.rmvb',  '.asf',   '.f4v',  '.mxf',  '.dv',
-    '.swf',   '.m2v',   '.svi',   '.mpe',  '.ogm',  '.bik',
-    '.xvid',  '.yuv',   '.qt',    '.gvi',  '.viv',  '.fli',
-    '.mjpg',  '.mjpeg', '.amv',   '.drc',  '.flc',  '.wve',
-    '.avchd', '.vp6',   '.ivf',   '.mps',  '.vro',  '.ssf',
-    '.hevc',  '.h265',  '.264',   '.str',  '.evo',  '.3g2',
-    '.h264',  '.av1',   '.ogx',   '.mlv',  '.ps',   '.tsx',
-    '.mp2v',  '.dvs',   '.gxf',   '.m4p',  '.webp', '.vp8',
-    '.trp',   '.f4p',   '.f4b',   '.f4m',  '.mk3d', '.3mm',
-    '.3gpp',  '.mod',   '.tod',   '.cine', '.arf',  '.wrf',
-    '.braw',  '.jmf',   '.r3d',   '.dpx',  '.mpv',  '.tsv',
-    '.rmx',   '.smk',   '.mkd',   '.mj2',  '.scm',  '.ivr',
-    '.xesc',  '.wtv',   '.dcr',   '.mpl',  '.pds',  '.ismv',
-    '.vc1',   '.vcd',   '.mpcpl', '.bin',  '.sfd',  '.qtz',
-    '.vdat',  '.vft',
+VIDEO_EXTENSIONS: list[str] = [
+    ".mp4",   ".mkv",   ".mov",   ".avi",    ".mpg",   ".mpeg", 
+    ".wmv",   ".m4v",   ".flv",   ".divx",   ".vob",   ".iso",  
+    ".3gp",   ".webm",  ".mts",   ".m2ts",   ".ts",    ".ogv",  
+    ".rm",    ".rmvb",  ".asf",   ".f4v",    ".mxf",   ".dv",   
+    ".swf",   ".m2v",   ".svi",   ".mpe",    ".ogm",   ".bik",  
+    ".xvid",  ".yuv",   ".qt",    ".gvi",    ".viv",   ".fli",  
+    ".mjpg",  ".mjpeg", ".amv",   ".drc",    ".flc",   ".vp6",  
+    ".ivf",   ".mps",   ".vro",   ".hevc",   ".h265",  ".264",  
+    ".str",   ".evo",   ".3g2",   ".h264",   ".av1",   ".ogx",  
+    ".mlv",   ".ps",    ".mp2v",  ".dvs",    ".gxf",   ".webp", 
+    ".vp8",   ".trp",   ".f4p",   ".mk3d",   ".3gpp",  ".mod",  
+    ".tod",   ".cine",  ".arf",   ".wrf",    ".braw",  ".jmf",  
+    ".r3d",   ".dpx",   ".mpv",   ".rmx",    ".smk",   ".mj2",  
+    ".scm",   ".ivr",   ".xesc",  ".wtv",    ".dcr",   ".ismv", 
+    ".vc1",   ".vcd",   ".bin",   ".sfd",    ".m2t",   ".m2p",
+    ".m1v",   ".y4m",   ".dif",   ".dvr-ms", ".tivo",  ".nuv",
+    ".nsv",   ".nut",   ".bk2",   ".usm",    ".xmv",   ".thp",
+    ".pmf",   ".h263",  ".h261",  ".vp9",
 ]
-video_extensions = [e.casefold() for e in video_extensions]  # Just in... case.
-# check_list_for_duplicates(video_extensions) # Run this after adding new extensions to ensure there are no duplicates.
+# check_list_for_duplicates(VIDEO_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
 # A comprehensive list of audio file extensions.
-audio_extensions: list[str] = [
-    '.mp3',   '.wav',   '.flac',  '.aac',   '.ogg',   '.wma',
-    '.m4a',   '.alac',  '.aiff',  '.opus',  '.amr',   '.pcm',
-    '.au',    '.raw',   '.dts',   '.ac3',   '.mka',   '.mpc',
-    '.vqf',   '.ape',   '.shn',   '.ra',    '.rm',    '.oga',
-    '.spx',   '.caf',   '.snd',   '.mid',   '.midi',  '.kar',
-    '.rmi',   '.m3u',   '.pls',   '.xspf',  '.asf',   '.wv',
-    '.aa',    '.aax',   '.dsf',   '.dff',   '.sf2',   '.g721',
-    '.voc',   '.swa',   '.bwf',   '.ivs',   '.smp',   '.htk',
-    '.sds',   '.brstm', '.adx',   '.hca',   '.ast',   '.psf',
-    '.psf2',  '.qsf',   '.ssf',   '.usf',   '.gsf',   '.flp',
-    '.dsm',   '.dmf',   '.mod',   '.s3m',   '.it',    '.xm',
-    '.mt2',   '.mo3',   '.umx',   '.tt',    '.tak',   '.trk',
-    '.669',   '.abc',   '.ts',    '.ym',    '.hsq',   '.mpa',
+AUDIO_EXTENSIONS: list[str] = [
+    ".mp3",   ".wav",   ".flac",  ".aac",   ".ogg",   ".wma",
+    ".m4a",   ".alac",  ".aiff",  ".opus",  ".amr",   ".pcm",
+    ".au",    ".raw",   ".dts",   ".ac3",   ".mka",   ".mpc",
+    ".vqf",   ".ape",   ".shn",   ".ra",    ".rm",    ".oga",
+    ".spx",   ".caf",   ".snd",   ".mid",   ".midi",  ".kar",
+    ".rmi",   ".asf",   ".wv",    ".mp4",   ".wave",  ".webm",
+    ".aa",    ".aax",   ".dsf",   ".dff",   ".sf2",   ".g721",
+    ".voc",   ".swa",   ".bwf",   ".ivs",   ".smp",   ".weba",
+    ".sds",   ".brstm", ".adx",   ".hca",   ".ast",   ".psf",
+    ".psf2",  ".qsf",   ".ssf",   ".usf",   ".gsf",   ".tta", 
+    ".dsm",   ".dmf",   ".mod",   ".s3m",   ".it",    ".xm",
+    ".mt2",   ".mo3",   ".umx",   ".mogg",  ".tak",   ".trk",
+    ".669",   ".abc",   ".ts",    ".ym",    ".hsq",   ".mpa",
+    ".m4b",   ".m4p",   ".mp2",   ".mp1",   ".aif",   ".aifc",
+    ".m4r",   ".adts",  ".eac3",  ".rf64",  ".w64",   ".sd2",
+    ".sph",   ".3gp",   ".3g2",   ".3ga",   ".ofr",   ".ofs",
+    ".la",    ".pac",   ".mlp",   ".thd",   ".aaxc",  ".dss",
+    ".ds2",   ".awb",   ".bcstm", ".bfstm", ".bcwav", ".bfwav",
+    ".fsb",   ".wem",   ".xwm",   ".lopus",
 ]
-audio_extensions = [e.casefold() for e in audio_extensions]  # Just in... case.
-# check_list_for_duplicates(audio_extensions) # Run this after adding new extensions to ensure there are no duplicates.
+# check_list_for_duplicates(AUDIO_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
 # A comprehensive list of subtitle file extensions.
-subtitle_extensions: list[str] = [
-    '.srt',   '.sub',    '.idx',   '.ass',   '.ssa',   '.vtt',
-    '.ttml',  '.dfxp',   '.smi',   '.smil',  '.usf',   '.psb',
-    '.mks',   '.lrc',    '.stl',   '.pjs',   '.rt',    '.aqt',
-    '.gsub',  '.jss',    '.dks',   '.mpl2',  '.tmp',   '.vsf',
-    '.zeg',   '.webvtt', '.scc',   '.cap',   '.asc',   '.qt.txt',  # match .qt.txt before .txt
-    '.sbv',   '.ebu',    '.sami',  '.xml',   '.itt',   '.txt',
+SUBTITLE_EXTENSIONS: list[str] = [
+    ".srt",   ".sub",    ".idx",   ".ass",   ".ssa",   ".vtt",
+    ".ttml",  ".dfxp",   ".smi",   ".smil",  ".usf",   ".psb",
+    ".mks",   ".lrc",    ".stl",   ".pjs",   ".rt",    ".aqt",
+    ".gsub",  ".jss",    ".dks",   ".mpl2",  ".sbt",   ".vsf",
+    ".zeg",   ".webvtt", ".scc",   ".cap",   ".asc",   ".sbv",
+    ".ebu",   ".sami",   ".xml",   ".itt",   ".txt",   ".sup",
+    ".sst",   ".son",    ".mcc",   ".pac",   ".890",   ".mpl",
+    ".onl",   ".cin",    ".tds",   ".ult",   ".ttxt",
 ]
-subtitle_extensions = [e.casefold() for e in subtitle_extensions]  # Just in... case.
-# check_list_for_duplicates(subtitle_extensions) # Run this after adding new extensions to ensure there are no duplicates.
+# check_list_for_duplicates(SUBTITLE_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
 # A comprehensive list of image file extensions.
-image_extensions: list[str] = [
-    '.bmp',   '.dib',   '.gif',   '.jpeg',  '.jpg',   '.jpe',
-    '.jfif',  '.pjpeg', '.pjp',   '.png',   '.pbm',   '.pgm',
-    '.ppm',   '.pnm',   '.pam',   '.tif',   '.tiff',  '.sgi',
-    '.rgb',   '.tga',   '.hdr',   '.exr',   '.webp',  '.apng',
-    '.heic',  '.heif',  '.avif',  '.jp2',   '.j2k',   '.j2c',
-    '.jxr',   '.svg',   '.svgz',  '.eps',   '.ai',    '.pdf',
-    '.cdr',   '.emf',   '.wmf',   '.dxf',   '.dwg',   '.mng',
-    '.raw',   '.arw',   '.cr2',   '.cr3',   '.dng',   '.erf',
-    '.raf',   '.orf',   '.pef',   '.rw2',   '.rwl',   '.sr2',
-    '.srw',   '.3fr',   '.kdc',   '.mrw',   '.mos',   '.nrw',
-    '.pcx',   '.pcd',   '.pic',   '.pct',   '.xcf',   '.psd',
-    '.psb',   '.kra',   '.fit',   '.fits',  '.fpx',   '.djvu',
-    '.djv',   '.lbm',   '.iff',
+IMAGE_EXTENSIONS: list[str] = [
+    ".bmp",  ".dib",   ".gif",    ".jpeg", ".jpg",  ".jpe",
+    ".jfif", ".pjpeg", ".pjp",    ".png",  ".pbm",  ".pgm",
+    ".ppm",  ".pnm",   ".pam",    ".tif",  ".tiff", ".sgi",
+    ".rgb",  ".tga",   ".hdr",    ".exr",  ".webp", ".apng",
+    ".heic", ".heif",  ".avif",   ".jp2",  ".j2k",  ".j2c",
+    ".jxr",  ".svg",   ".svgz",   ".eps",  ".ai",   ".pdf",
+    ".cdr",  ".emf",   ".wmf",    ".dxf",  ".dwg",  ".mng",
+    ".raw",  ".arw",   ".cr2",    ".cr3",  ".dng",  ".erf",
+    ".raf",  ".orf",   ".pef",    ".rw2",  ".rwl",  ".sr2",
+    ".srw",  ".3fr",   ".kdc",    ".mrw",  ".mos",  ".nrw",
+    ".pcx",  ".pcd",   ".pic",    ".pct",  ".xcf",  ".psd",
+    ".psb",  ".kra",   ".fit",    ".fits", ".fpx",  ".djvu",
+    ".djv",  ".lbm",   ".iff",    ".ico",  ".icns", ".dds",
+    ".jxl",  ".xbm",   ".xpm",    ".ras",  ".jpf",  ".jpx",
+    ".jpm",  ".qoi",   ".bpg",    ".flif", ".cgm",  ".ktx",
+    ".ktx2", ".pvr",   ".basis",  ".nef",  ".crw",  ".dcr",
+    ".k25",  ".iiq",   ".fff",    ".mef",  ".x3f",  ".hif",
+    ".dcm",  ".nii",   ".gz",     ".nrrd", ".mha",  ".mhd",       # ".gz" matches ".nii.gz"
+    ".mrc",  ".sid",   ".ecw",    ".bil",  ".bip",  ".aseprite",
+    ".g3",   ".g4",    ".fax",    ".sff",  ".wsq",  ".pspimage",
+    ".pdn",  ".psp",   ".ps",     ".ase",  ".clip", ".afphoto",
+    ".bsq",
 ]
-image_extensions = [e.casefold() for e in image_extensions]  # Just in... case.
-# check_list_for_duplicates(image_extensions) # Run this after adding new extensions to ensure there are no duplicates.
+# check_list_for_duplicates(IMAGE_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
+
+# A comprehensive list of playlist file extensions.
+PLAYLIST_EXTENSIONS: list[str] = [
+    ".m3u",    ".m3u8",    ".pls",  ".xspf",  ".asx",    ".wpl",
+    ".zpl",    ".b4s",     ".cue",  ".smil",  ".smi",    ".ram",
+    ".wax",    ".wmx",     ".wvx",  ".fpl",   ".mpcpl",  ".dpl",
+    ".aimppl", ".aimppl4", ".pla",  ".xml",
+]
+# check_list_for_duplicates(PLAYLIST_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
 # A comprehensive list of archive file extensions.
-archive_extensions: list[str] = [
-    '.zip',     '.rar',    '.7z',    '.tar.gz', '.tar.bz2', '.tar.xz',  # match .tar.(gz,bz2,xz) before (.gz,.bz2,.xz)
-    '.tar.zst', '.tar',    '.gz',    '.tgz',    '.bz2',     '.xz',
-    '.tbz2',    '.tz2',    '.lzma',  '.lz',     '.xpi',     '.crx',
-    '.zst',     '.cab',    '.arj',   '.ace',    '.uue',     '.zoo',
-    '.jar',     '.war',    '.ear',   '.iso',    '.img',     '.dmg',
-    '.lzh',     '.lha',    '.cpio',  '.deb',    '.rpm',     '.apk',
-    '.pak',     '.arc',    '.a',     '.mar',    '.b1',      '.wim',
-    '.shar',    '.run',    '.shk',   '.sit',    '.sitx',    '.zpaq',
-    '.br', 
+ARCHIVE_EXTENSIONS: list[str] = [
+    ".zip",     ".rar",    ".7z",    ".tar",    ".gz",      ".tgz",
+    ".bz2",     ".xz",     ".tbz2",  ".tz2",    ".lzma",    ".lz",
+    ".xpi",     ".crx",    ".zst",   ".cab",    ".arj",     ".ace",
+    ".uue",     ".zoo",    ".jar",   ".war",    ".ear",     ".iso",
+    ".img",     ".dmg",    ".lzh",   ".lha",    ".cpio",    ".deb",
+    ".rpm",     ".apk",    ".pak",   ".arc",    ".a",       ".mar",
+    ".b1",      ".wim",    ".shar",  ".run",    ".shk",     ".sit",
+    ".sitx",    ".zpaq",   ".br",    ".zipx",   ".xar",     ".dar",
+    ".ar",      ".tbz",    ".tb2",   ".txz",    ".tlz",     ".taz",
+    ".tzo",     ".tzst",   ".lzo",   ".lz4",    ".phar",    ".asar",
+    ".whl",     ".nupkg",  ".gem",   ".crate",  ".conda",   ".ipa",
+    ".cbz",     ".cbr",    ".cb7",   ".kmz",    ".warc",    ".pk3",
+    ".pk4",     ".alz",    ".cpt",   ".ha",     ".sqx",     ".z01",
+    ".r00",     ".001",  
 ]
-archive_extensions = [e.casefold() for e in archive_extensions]  # Just in... case.
-# check_list_for_duplicates(archive_extensions) # Run this after adding new extensions to ensure there are no duplicates.
+# Technically this list should include .z02... and .r01... and .002...
+ARCHIVE_EXTENSIONS.extend([f".z{num:02d}" for num in range(2, 100)])
+ARCHIVE_EXTENSIONS.extend([f".r{num:02d}" for num in range(1, 100)])
+ARCHIVE_EXTENSIONS.extend([f".{num:03d}"  for num in range(2, 100)])
+# check_list_for_duplicates(ARCHIVE_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
-# Put subtitle_ext before text_ext so .qt.txt matches before .txt
-all_known_extensions: list[str] = python_extensions + subtitle_extensions + \
-                                  text_extensions   + video_extensions    + \
-                                  audio_extensions  + image_extensions    + \
-                                  archive_extensions  
-# check_list_for_duplicates(all_extensions) # Run this after adding new extensions to ensure there are no duplicates. But in this case there WILL be because subtitle_extensions and text_extensions overlap.
+ALL_KNOWN_EXTENSIONS: list[str] = PYTHON_EXTENSIONS   + TEXT_EXTENSIONS  + \
+                                  SUBTITLE_EXTENSIONS + VIDEO_EXTENSIONS + \
+                                  AUDIO_EXTENSIONS    + IMAGE_EXTENSIONS + \
+                                  PLAYLIST_EXTENSIONS + ARCHIVE_EXTENSIONS
+# print(f"{len(ALL_KNOWN_EXTENSIONS)} total known extensions.")
+ALL_KNOWN_EXTENSIONS = list(set(ALL_KNOWN_EXTENSIONS))  # Remove duplicates
+# print(f"{len(ALL_KNOWN_EXTENSIONS)} total known extensions.")
+# for ext in ALL_KNOWN_EXTENSIONS:
+#     if any(c.isupper() for c in ext):
+#         raise ValueError(f"Extension '{ext}' in ALL_KNOWN_EXTENSIONS contains uppercase characters.")
+#     if ext.count('.') > 1:
+#         raise ValueError(f"Extension '{ext}' in ALL_KNOWN_EXTENSIONS contains multiple periods.")
