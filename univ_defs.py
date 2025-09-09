@@ -230,12 +230,13 @@ def return_method_name(levels_up: int = 1) -> str:
 
 class SelectionStrategy(str, Enum):
     """Enumeration of selection strategies for model selection."""
-    CHEAPEST:               str = "cheapest"
-    CONTEXT_THEN_PRICE:     str = "context_then_price"
-    PERFORMANCE_THEN_PRICE: str = "performance_then_price"
-    LOWEST_TTFT:            str = "lowest_ttft"
-    FASTEST:                str = "fastest"
-    SMALLEST:               str = "smallest"
+    CHEAPEST                 = "cheapest"
+    CONTEXT_THEN_PRICE       = "context_then_price"
+    CODE_SKILL_THEN_PRICE    = "code_skill_then_price"
+    GENERAL_SKILL_THEN_PRICE = "general_skill_then_price"
+    LOWEST_TTFT              = "lowest_TTFT"
+    FASTEST                  = "fastest"
+    SMALLEST                 = "smallest"
 
 
 @dataclass
@@ -245,8 +246,10 @@ class LLMConfig:
     use_litellm:        bool = True
     allow_local_models: bool = True
     use_local_model:    bool = False
-    local_model_name:    str = "qwen2.5-coder:1.5b-base"
+    local_model_name:    str = "ollama/qwen2.5-coder:1.5b-base"
+
     ollama_base_url:     str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    vllm_base_url:       str = os.getenv("VLLM_BASE_URL",   "http://localhost:8000")
 
     # Selection knobs
     selection_strategy: SelectionStrategy | str = SelectionStrategy.CHEAPEST
@@ -256,7 +259,6 @@ class LLMConfig:
 
     # Candidates + scoring
     candidate_models:    list[str] = field(default_factory=list)    # if empty -> _default_candidate_models()
-    model_scores: dict[str, float] = field(default_factory=dict) # if empty -> _default_model_scores() (+env JSON merge)
 
     # Back-compat defaults (filled after selection)
     default_model:   str = "gpt-3.5-turbo"
@@ -266,14 +268,16 @@ class LLMConfig:
     default_temperature: float = 0.0
     max_tokens:            int = 1000
 
+    model_scores: dict[str, float | dict[str, float]] = field(default_factory=dict)
+
     # --- multi-objective preferences ---
     prefer_code:                    bool = False  # emphasize coding skill
-    prefer_low_ttft:                bool = False  # emphasize time-to-first-token
+    prefer_low_TTFT:                bool = False  # emphasize time-to-first-token
     prefer_local:                   bool = False  # *prefer* local (not a hard requirement)
-    max_estimated_cost_usd: float | None = None   # hard cap per (assumed_in, assumed_out)
+    max_estimated_cost:     float | None = None   # hard cap per (assumed_in, assumed_out)
 
     # Optional constraints
-    tps_floor:              float | None = None   # minimum steady-state tokens/sec (if known)
+    speed_floor:              float | None = None   # minimum steady-state speed (in tokens/sec) (if known)
 
     # --- weights for the composite score (lower = better) ---
     # If a weight remains 0 but a corresponding prefer_* flag is True,
@@ -281,30 +285,39 @@ class LLMConfig:
     weight_price:                  float = 1.0    # always keep some price pressure
     weight_code_skill:             float = 0.0
     weight_general_skill:          float = 0.0
-    weight_ttft:                   float = 0.0
-    weight_tps:                    float = 0.0    # lower penalty when higher TPS
+    weight_TTFT:                   float = 0.0    # lower penalty when higher TTFT
+    weight_speed:                  float = 0.0    # lower penalty when lower speed
     weight_nonlocal_penalty:       float = 0.0    # penalty if prefer_local=True and model is not local
 
 
-_DEFAULT_MODEL_SKILL = 0.5  # default skill level for models without specific default skill
+_DEFAULT_MODEL_SKILL:      float =  0.5  # default skill level for models without specific default skill
+_DEFAULT_MODEL_CONTEXT:      int = 8192  # default context window for models without specific context
+_DEFAULT_MODEL_PARAMETERS: float = 9E99  # default number of parameters for models without specific parameter count
 
 @dataclass
 class ModelInfo:
     """Information about a candidate Large Language Model (LLM)."""
     name:                    str
-    provider:                str  # e.g., "OpenAI", "Anthropic", "Ollama", "vLLM"
-    context_window:          int  # tokens
+    provider:                str  # e.g., "OpenAI", "Anthropic", "Mistral", "IBM"
+    context_window:          int  # in+out, in tokens
     input_cost_per_token:  float  # $/token (normalized)
     output_cost_per_token: float  # $/token (normalized)
+    available:              bool  # Is env/api key/endpoint reachable (best effort)?
     is_local:               bool  # True for Ollama, vLLM, or similar
-    available:              bool  # env/api key/endpoint reachable (best effort)
-    performance_score:     float = _DEFAULT_MODEL_SKILL  # your objective score if any (higher better)
-    meta:         dict[str, Any] = field(default_factory=dict)
-
+    # Values without defaults have to be listed before values with defaults.
+    runtime:        str | None = None  # e.g., "Ollama", "vLLM"
+    parameters:            float = _DEFAULT_MODEL_PARAMETERS  # number of model parameters
     code_skill:            float = _DEFAULT_MODEL_SKILL  # 0..1, coding-centric capability
     general_skill:         float = _DEFAULT_MODEL_SKILL  # 0..1, broad/academic capability
-    ttft_ms:          int | None = None  # time-to-first-token (ms); None = unknown
-    tps:            float | None = None  # tokens/sec after first token; None = unknown
+    TTFT:           float | None = None  # time-to-first-token (seconds); None = unknown
+    speed:          float | None = None  # tokens/sec after first token;  None = unknown
+    meta:         dict[str, Any] = field(default_factory=dict)  # diagnostics/etc. not used for selection
+
+    def __post_init__(self) -> None:
+        """Post-initialization checks."""
+        # Enforce runtime only when relevant.
+        if self.is_local and not self.runtime:
+            raise ValueError(f"runtime is required when is_local=True for model '{self.name}' (e.g., 'Ollama', 'vLLM').")
 
     def estimate_cost(self, tokens_in: int, tokens_out: int) -> float:
         """Estimate cost for a given input/output token count."""
@@ -338,167 +351,264 @@ class LLMs:
     # Default model preferences
     # ----------------------------
 
-    # Candidate shortnames (what you’re willing to consider by default).
-    # Keep "ollama/<model>" entries so local models remain discoverable.
-    _DEFAULT_CANDIDATES: list[str] = [
+    model_info: dict[str, dict[str, Any]] = {
+
+        ##################################
         # OpenAI
-        "gpt-3.5-turbo",
-        "gpt-4o-mini",
-        "gpt-4o",
-        "gpt-4.1",          # [S5]
-        "gpt-4.1-mini",     # [S5]
-        "gpt-4.1-nano",     # [S5]
-        "o1-mini",          # reasoning/“thinking”
-        "o3-mini",          # faster than o1-mini TTFT by ~2.5s [S12]
-        "o4-mini",          # newer small reasoning model (2025) [S19]
-        "gpt-5",            # 2025 model family (API) [S4]
+        ##################################
 
+        "gpt-3.5-turbo": {
+            "provider"   : "OpenAI",
+            "context"    : 16_385,
+            "code_skill" : 0.60,
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "gpt-4o-mini": {
+            "provider"   : "OpenAI",
+            "context"    : 128_000,
+            "code_skill" : 0.80,     # improved smalls trend; near 4.1-mini on many evals [S6]
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "gpt-4o": {
+            "provider"   : "OpenAI",
+            "context"    : 128_000,
+            "code_skill" : 0.93,     # strong coding; multiple evals (Aider diff, SWE gains) [S6]
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "gpt-4.1": {
+            "provider"      : "OpenAI",
+            "context"       : 1_000_000,  # [S5,S6]
+            "code_skill"    : 0.94,       # OpenAI shows +21% vs 4o on SWE-bench Verified [S6]
+            "general_skill" : 0.92,       # MMLU 90.2%, GPQA Diamond 66.3% [S6]
+            "TTFT"          : 15.0,       # ~15s TTFT at 128k; ~60s at 1M (OpenAI) [S7]
+            "speed"         : 124.0,      # ArtificialAnalysis provider aggregate [S2]
+            "local"         : False,
+            "parameters"    : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "gpt-4.1-mini": {
+            "provider"   : "OpenAI",
+            "context"    : 1_000_000,  # [S6] (OpenAI says 4.1 family supports up to 1M)
+            "code_skill" : 0.82,       # “beats 4o on many evals”; keep slightly above 4o-mini [S6]
+            "speed"      : 75.8,       # AA aggregate (time-varying)
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "gpt-4.1-nano": {
+            "provider"   : "OpenAI",
+            "context"    : 1_000_000,  # [S6]
+            "code_skill" : 0.65,       # small, but 1M ctx and better than 4o-mini on some evals [S6]
+            "TTFT"       : 5.0,        # “often <5s” for 128k inputs (OpenAI) [S7]
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "o1-mini": {
+            "provider"   : "OpenAI",
+            "context"    : 128_000,  # context per OpenAI docs; o3/o4-mini are 200k [S28]
+            "code_skill" : 0.86,     # strong reasoning; coding solid but slower TTFT [S14,S7]
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "o3-mini": {
+            "provider"      : "OpenAI",
+            "context"       : 200_000,  # [S28]
+            "code_skill"    : 0.88,     # faster TTFT than o1-mini; coding near o1 mini [S12,S6]
+            "general_skill" : 0.89,     # strong reasoning for size [S6,S7]
+            "TTFT"          : 8.0,      # AA & coverage: higher latency than smalls, but improved vs o1 [S14,S7]
+            "speed"         : 163.0,    # AA [S12]
+            "local"         : False,
+            "parameters"    : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "o4-mini": {
+            "provider"   : "OpenAI",
+            "context"    : 200_000,  # [S28]
+            "code_skill" : 0.90,     # newer small reasoning; top small-code in AA index
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "gpt-5": {
+            "provider"      : "OpenAI",
+            "context"       : 400_000,  # API total context, 128k max output (OpenAI) [S1]
+            "code_skill"    : 0.96,     # frontier; AA shows top “intelligence index” class [S1,S21]
+            "general_skill" : 0.95,     # AA Intelligence Index leader tier [S1,S21]
+            "local"         : False,
+            "parameters"    : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        ##################################
         # Anthropic
-        "claude-3-haiku-20240229",
-        "claude-3-5-sonnet-20241022",
-        "claude-3-7-sonnet-20250219",  # hybrid reasoning; strong SWE-bench [S13, S16]
+        ##################################
 
-        # Mistral (and code-specialized)
-        "mistral-large-2",       # 2024 flagship; improved code [S9]
-        "mistral-medium-2505",   # 2025 multimodal frontier [S8]
-        "codestral-25.01",       # 2025 Jan coding model; ~2x speed vs 2024 version [S10]
-        "codestral-25.08",       # latest 2025 Aug coding release [S8]
+        "claude-3-haiku-20240229": {
+            "provider"   : "Anthropic",
+            "context"    : 200_000,  # Anthropic docs & vendor pages [S26,S27]
+            "code_skill" : 0.70,
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
 
-        # Local (Ollama)
-        "ollama/qwen2.5-coder:1.5b-base",
-        "ollama/qwen2.5-coder:3b-base",
-        "ollama/codegemma:2b-code",
-        "ollama/starcoder2:3b",
-        "ollama/granite-code:3b",
-        "ollama/phi3.5:3.8b",
-        "ollama/llama3:8b",
-    ]
+        "claude-3-5-sonnet-20241022": {
+            "provider"   : "Anthropic",
+            "context"    : 200_000,  # [S26,S27]
+            "code_skill" : 0.92,
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
 
-    # --------------------------------------------------------------------
-    # Context windows (tokens). When provider docs/SDKs give clear values,
-    # prefer those. Otherwise use conservative defaults. Footnotes point to sources.
-    # --------------------------------------------------------------------
-    _DEFAULT_CONTEXT: dict[str, int] = {
-        # OpenAI
-        "gpt-3.5-turbo"      :    16_385,
-        "gpt-4o-mini"        :   128_000,
-        "gpt-4o"             :   128_000,
-        "gpt-4.1"            : 1_000_000,  # [S5,S6]
-        "gpt-4.1-mini"       : 1_000_000,  # [S6] (OpenAI says 4.1 family supports up to 1M)
-        "gpt-4.1-nano"       : 1_000_000,  # [S6]
-        "o1-mini"            :   128_000,  # context per OpenAI docs; o3/o4-mini are 200k [S28]
-        "o3-mini"            :   200_000,  # [S28]
-        "o4-mini"            :   200_000,  # [S28]
-        "gpt-5"              :   400_000,  # API total context: 272k in + 128k out (OpenAI) [S1]
+        "claude-3-7-sonnet-20250219": {
+            "provider"      : "Anthropic",
+            "context"       : 200_000,  # [S21,S26,S27] (Sonnet 4 has 1M, not 3.7) [S20]
+            "code_skill"    : 0.93,     # leads/near-top on SWE-bench Verified [S13,S16]
+            "general_skill" : 0.90,     # hybrid reasoning; strong OSWorld & agentic [S16]
+            "TTFT"          : 1.16,     # ~1.16s avg; reports of ~0.2s for quick replies (varies) [S36]
+            "speed"         : 65.5,     # AA [S36]
+            "local"         : False,
+            "parameters"    : 123E9,
+        },
 
-        # Anthropic
-        "claude-3-haiku-20240229"    : 200_000,  # Anthropic docs & vendor pages [S26,S27]
-        "claude-3-5-sonnet-20241022" : 200_000,  # [S26,S27]
-        "claude-3-7-sonnet-20250219" : 200_000,  # [S21,S26,S27] (Sonnet 4 has 1M, not 3.7) [S20]
-
+        ##################################
         # Mistral
-        "mistral-large-2"      : 128_000,  # product pages and summaries [S9,S23]
-        "mistral-medium-2505"  : 128_000,  # [S8]
-        "codestral-25.01"      : 256_000,  # Mistral docs list Codestral 25.01/25.08 at 256k [S8,S10]
-        "codestral-25.08"      : 256_000,  # [S8]
+        ##################################
 
-        # Local (Ollama) — keep your prior values where official numbers are sparse
-        "ollama/qwen2.5-coder:1.5b-base" :  32_768,
-        "ollama/qwen2.5-coder:3b-base"   :  32_768,
-        "ollama/codegemma:2b-code"       :  16_384,  # conservative default; see CodeGemma model card
-        "ollama/starcoder2:3b"           :  16_384,  # StarCoder2 smalls default 16k
-        "ollama/granite-code:3b"         : 128_000,  # IBM Granite-3B-Code-Instruct-128K [S18]
-        "ollama/phi3.5:3.8b"             : 128_000,  # Microsoft release/Foundry catalog [S34]
-        "ollama/llama3:8b"               :   8_192,
-    }
+        "mistral-large-2": {
+            "provider"      : "Mistral",
+            "context"       : 128_000,  # product pages and summaries [S9,S23]
+            "code_skill"    : 0.90,     # claims match GPT-4o on coding; multiple writeups [S11,S17]
+            "general_skill" : 0.86,     # broad improvements vs Large 1; multilingual [S9]
+            "local"         : False,
+            "parameters"    : _DEFAULT_MODEL_PARAMETERS,
+        },
 
-    # ------------------------------------------------------------------------------------
-    # Back-compat: retain a single-axis “performance” for callers that expect it.
-    # Here we define it as *coding skill* (0..1), primarily pegged to HumanEval pass@1
-    # or close coding proxies; otherwise, we set a conservative estimate and note source.
-    # ------------------------------------------------------------------------------------
-    _DEFAULT_CODE_SKILL: dict[str, float] = {
-        # OpenAI (anchor points; you already had some)
-        "gpt-4o"                     : 0.93,  # strong coding; multiple evals (Aider diff, SWE gains) [S6]
-        "gpt-4o-mini"                : 0.80,  # improved smalls trend; near 4.1-mini on many evals [S6]
-        "gpt-3.5-turbo"              : 0.60,  # your prior anchor
-        "gpt-4.1"                    : 0.94,  # OpenAI shows +21% vs 4o on SWE-bench Verified [S6]
-        "gpt-4.1-mini"               : 0.82,  # “beats 4o on many evals”; keep slightly above 4o-mini [S6]
-        "gpt-4.1-nano"               : 0.65,  # small, but 1M ctx and better than 4o-mini on some evals [S6]
-        "o1-mini"                    : 0.86,  # strong reasoning; coding solid but slower TTFT [S14,S7]
-        "o3-mini"                    : 0.88,  # faster TTFT than o1-mini; coding near o1 mini [S12,S6]
-        "o4-mini"                    : 0.90,  # newer small reasoning; top small-code in AA index
-        "gpt-5"                      : 0.96,  # frontier; AA shows top “intelligence index” class [S1,S21]
+        "mistral-medium-2505": {
+            "provider"   : "Mistral",
+            "context"    : 128_000,  # [S8]
+            "code_skill" : 0.82,     # below Large, above earlier Mediums; frontier multi [S8]
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
 
-        # Anthropic
-        "claude-3-haiku-20240229"    : 0.70,  # your prior anchor
-        "claude-3-5-sonnet-20241022" : 0.92,  # your prior anchor (and aligns with strong code)
-        "claude-3-7-sonnet-20250219" : 0.93,  # leads/near-top on SWE-bench Verified [S13,S16]
+        "codestral-25.01": {
+            "provider"   : "Mistral",
+            "context"    : 256_000,  # Mistral docs list Codestral 25.01/25.08 at 256k [S8,S10]
+            "code_skill" : 0.86,     # upgraded Codestral; ~2x speed & strong HE/MBPP [S10,S9]
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
 
-        # Mistral (coding-specialized and gen)
-        "mistral-large-2"            : 0.90,  # claims match GPT-4o on coding; multiple writeups [S11,S17]
-        "mistral-medium-2505"        : 0.82,  # below Large, above earlier Mediums; frontier multi [S8]
-        "codestral-25.01"            : 0.86,  # upgraded Codestral; ~2x speed & strong HE/MBPP [S10,S9]
-        "codestral-25.08"            : 0.88,  # latest Codestral (summer 2025) [S8]
+        "codestral-25.08": {
+            "provider"   : "Mistral",
+            "context"    : 256_000,  # [S8]
+            "code_skill" : 0.88,     # latest Codestral (summer 2025) [S8]
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
 
-        # ---------- Local models (you asked to fill these 0.00s) ----------
-        # For locals we normalize to 0..1 mainly from HumanEval pass@1 (or closest proxy),
-        # keeping conservative values when public numbers vary widely. See sources per line.
-
-        "ollama/qwen2.5-coder:1.5b-base" : 0.41,  # ~41 average across 9 langs for 1.5B *base* [S3]
-        "ollama/qwen2.5-coder:3b-base"   : 0.48,  # ~48 average across 9 langs for 3B *base* [S3]
-        # Note: 3B *Instruct* has much higher reported HE pass@1 (70–84%) depending on setup, but
-        # base variants in Ollama perform lower; we use the base multi-lang average as a safer floor. [S3,S29]
-
-        "ollama/codegemma:2b-code"       : 0.311, # HumanEval pass@1 = 31.1% (official model card)
-        "ollama/starcoder2:3b"           : 0.317, # ~31.7% pass@1 typical; ~31.1 avg across langs in Qwen2.5 tbl [S3,S30]
-        "ollama/granite-code:3b"         : 0.414, # HumanEvalSynthesis pass@1 (avg) ≈ 41.4% (HF model card) [S18]
-        "ollama/phi3.5:3.8b"             : 0.56,  # mid-estimate: reports cluster ~0.50–0.63 HE for 3.5-mini [S31,S33]
-        "ollama/llama3:8b"               : 0.55,  # your prior anchor; aligns w/ public mid-tier code results
-    }
-
-    # Keep your original name for back-compat with existing code paths.
-    _DEFAULT_MODEL_SCORES: dict[str, float] = _DEFAULT_CODE_SKILL
-
-    # ---------------------------------------------------------------------------
-    # Optional: default general-skill anchors (0..1) from broad evals (MMLU/GPQA).
-    # These are *not* strict; they just help when you want “well-rounded” models.
-    # ---------------------------------------------------------------------------
-    _DEFAULT_GENERAL_SKILL: dict[str, float] = {
-        "gpt-4.1"                    : 0.92,  # MMLU 90.2%, GPQA Diamond 66.3% [S6]
-        "gpt-5"                      : 0.95,  # AA Intelligence Index leader tier [S1,S21]
-        "o3-mini"                    : 0.89,  # strong reasoning for size [S6,S7]
-        "claude-3-7-sonnet-20250219" : 0.90,  # hybrid reasoning; strong OSWorld & agentic [S16]
-        "mistral-large-2"            : 0.86,  # broad improvements vs Large 1; multilingual [S9]
-        "ollama/phi3.5:3.8b"         : 0.69,  # Phi-3 mini MMLU ~69%; 3.5 mini similar+ [S32]
-        "ollama/llama3:8b"           : 0.66,  # Llama3-8B MMLU ballpark; public reports ~66–67% [S35]
-        # (Everything else will default via your selection heuristics if absent)
-    }
-
-    # --------------------------------------------------------------------------------
-    # Speed heuristics. Values here are meant as *priors*; your runtime can observe
-    # actual TTFT/TPS and override per provider. Units: ms for TTFT, tokens/sec for TPS.
-    # --------------------------------------------------------------------------------
-    _DEFAULT_TTFT_MS: dict[str, int | None] = {
-        "gpt-4.1"                      : 15_000,  # ~15s TTFT at 128k; ~60s at 1M (OpenAI) [S7]
-        "gpt-4.1-nano"                 :  5_000,  # “often <5s” for 128k inputs (OpenAI) [S7]
-        "o3-mini"                      :  8_000,  # AA & coverage: higher latency than smalls, but improved vs o1 [S14,S7]
-        "claude-3-7-sonnet-20250219"   :  1_160,  # ~1.16s avg; reports of ~0.2s for quick replies (varies) [S36]
+        ##################################
+        # Local (Ollama)
         # Local models are hardware-dependent; leave None to encourage live measurement:
-        "ollama/qwen2.5-coder:3b-base" : None,
-        "ollama/llama3:8b"             : None,
-    }
-
-    _DEFAULT_TOKENS_PER_SEC: dict[str, float | None] = {
-        "gpt-4.1"                      : 124.0,  # ArtificialAnalysis provider aggregate [S2]
-        "gpt-4.1-mini"                 :  75.8,  # AA aggregate (time-varying)
-        "o3-mini"                      : 163.0,  # AA [S12]
-        "claude-3-7-sonnet-20250219"   :  65.5,  # AA [S36]
         # local models -> measure at runtime
-        "ollama/qwen2.5-coder:3b-base" : None,
-        "ollama/llama3:8b"             : None,
+        ##################################
+
+        "ollama/qwen2.5-coder:1.5b-base": {
+            "provider"   : "Alibaba Cloud",
+            "context"    : 32_768,
+            "code_skill" : 0.41,    # ~41 average across 9 langs for 1.5B *base* [S3]
+            "local"      : True,
+            "runtime"    : "Ollama",
+            "parameters" : 1.5E9,
+        },
+
+        "ollama/qwen2.5-coder:3b-base": {
+            "provider"   : "Alibaba Cloud",
+            "context"    : 32_768,
+            "code_skill" : 0.48,    # ~48 average across 9 langs for 3B *base* [S3]
+            "local"      : True,
+            "runtime"    : "Ollama",
+            "parameters" : 3.0E9,
+        },
+
+        "ollama/codegemma:2b-code": {
+            "provider"   : "Google",
+            "context"    : 8_192,   # [S38, S39]
+            "code_skill" : 0.311,   # HumanEval pass@1 = 31.1% (official model card)
+            "local"      : True,
+            "runtime"    : "Ollama",
+            "parameters" : 2.0E9,
+        },
+
+        "ollama/starcoder2:3b": {
+            "provider"   : "BigCode",
+            "context"    : 16_384,  # StarCoder2 smalls default 16k
+            "code_skill" : 0.317,   # ~31.7% pass@1 typical; ~31.1 avg across langs in Qwen2.5 tbl [S3,S30]
+            "local"      : True,
+            "runtime"    : "Ollama",
+            "parameters" : 3.0E9,
+        },
+
+        "ollama/granite-code:3b": {
+            "provider"   : "IBM",
+            "context"    : 128_000,  # IBM Granite-3B-Code-Instruct-128K [S18]
+            "code_skill" : 0.262,    # [S40, S41]
+            "local"      : True,
+            "runtime"    : "Ollama",
+            "parameters" : 3.0E9,
+        },
+
+        "ollama/phi3.5:3.8b": {
+            "provider"      : "Microsoft",
+            "context"       : 128_000,  # Microsoft release/Foundry catalog [S34]
+            "code_skill"    : 0.56,     # mid-estimate: reports cluster ~0.50–0.63 HE for 3.5-mini [S31,S33]
+            "general_skill" : 0.69,     # Phi-3 mini MMLU ~69%; 3.5 mini similar+ [S32]
+            "local"         : True,
+            "runtime"       : "Ollama",
+            "parameters"    : 3.8E9,
+        },
+
+        "ollama/mistral:7b-instruct-q4_0": {
+            "provider"      : "Mistral",
+            "context"       : 8_192,     # conservative default; some builds enable up to ~32k
+            "code_skill"    : 0.52,      # solid general LLM; decent coding for 7B instruct
+            "general_skill" : 0.64,      # typical bench range for Mistral-7B-Instruct [S42, S43, S44]
+            "local"         : True,
+            "runtime"       : "Ollama",
+            "parameters"    : 7.0E9,
+        },
+
+        "ollama/llama3:8b": {
+            "provider"      : "Meta",
+            "context"       : 8_192,
+            "code_skill"    : 0.55,   # aligns w/ public mid-tier code results
+            "general_skill" : 0.66,   # Llama3-8B MMLU ballpark; public reports ~66–67% [S35]
+            "local"         : True,
+            "runtime"       : "Ollama",
+            "parameters"    : 8.0E9,
+        },
+
+        "ollama/llama3.1:8b-instruct-q4_0": {
+            "provider"      : "Meta",
+            "context"       : 128_000,   # Llama 3.1 8B supports 128k
+            "code_skill"    : 0.58,      # slight bump vs Llama 3 8B; quantized
+            "general_skill" : 0.70,      # stronger reasoning/knowledge vs 3.0 [S45, S46]
+            "local"         : True,
+            "runtime"       : "Ollama",
+            "parameters"    : 8.0E9,
+        },
     }
 
+    ##################################
+    # References
+    ##################################
     #  S1 — OpenAI: Introducing GPT-5 for developers — https://openai.com/index/introducing-gpt-5-for-developers/  
     #  S2 — Artificial Analysis: GPT-4.1 (speed/latency/TPS aggregates) — https://artificialanalysis.ai/models/gpt-4-1  
     #  S3 — Aider LLM Leaderboards (Polyglot code-editing benchmark) — https://aider.chat/docs/leaderboards/  
@@ -536,28 +646,24 @@ class LLMs:
     # S35 — HF Model Card: meta-llama/Meta-Llama-3-8B (8k ctx; base references) — https://huggingface.co/meta-llama/Meta-Llama-3-8B  
     # S36 — Artificial Analysis: Claude 3.7 Sonnet (standard/thinking; TTFT & TPS) — https://artificialanalysis.ai/models/claude-3-7-sonnet / https://artificialanalysis.ai/models/claude-3-7-sonnet-thinking
     # S37 — OpenAI Community - https://community.openai.com/t/what-is-the-token-context-window-size-of-the-gpt-4-o1-preview-model/954321
-    #
-    # ------------------------------------------------------------------------------
-    # Optional: explicit zero-pricing for local/Ollama models so “cheapest” logic can
-    # treat them as cost=0 (your caller already gates on availability).
-    # ------------------------------------------------------------------------------
-    _DEFAULT_PRICE_OVERRIDES_PER_1M: dict[str, tuple[float, float]] = {
-        # name -> (input_usd_per_million, output_usd_per_million)
-        "ollama/qwen2.5-coder:1.5b-base" : (0.0, 0.0),
-        "ollama/qwen2.5-coder:3b-base"   : (0.0, 0.0),
-        "ollama/codegemma:2b-code"       : (0.0, 0.0),
-        "ollama/starcoder2:3b"           : (0.0, 0.0),
-        "ollama/granite-code:3b"         : (0.0, 0.0),
-        "ollama/phi3.5:3.8b"             : (0.0, 0.0),
-        "ollama/llama3:8b"               : (0.0, 0.0),
-    }
+    # S38 - https://huggingface.co/google/codegemma-2b
+    # S39 - https://arxiv.org/pdf/2406.11409
+    # S40 - https://huggingface.co/ibm-granite/granite-3b-code-instruct-128k/blame/main/README.md
+    # S41 - https://www.ibm.com/docs/en/watsonx/w-and-w/2.2.0?topic=models-granite-3b-code-instruct-v2-model-card
+    # S42 - MMLU-CF leaderboard — row “Mistral-7B-instruct-v0.3” (MMLU 5-shot 60.3; MMLU-CF 5-shot 50.7; also 0-shot values) - https://github.com/microsoft/MMLU-CF
+    # S43 - Evaluating Code Quality from Quantized LLMs — reports Mistral Instruct 7B HumanEval+ pass@1 ≈ 25% (notes the EvalPlus variant) - https://arxiv.org/pdf/2411.10656
+    # S44 - Mistral 7B announcement — qualitative coding claim “approaches CodeLlama 7B performance on code” - https://mistral.ai/news/announcing-mistral-7b
+    # S45 - Meta Llama 3.1 8B Instruct model card — instruction-tuned benchmarks incl. MMLU 69.4, HumanEval 72.6, MBPP++ 72.8 - https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
+    # S46 - Llama 3.1 8B Instruct eval details dataset — per-task results backing the model card table - https://huggingface.co/datasets/meta-llama/Llama-3.1-8B-Instruct-evals
 
     # Provider -> required env var
-    _PROVIDER_ENV: dict[str, str] = {
+    _provider_env: dict[str, str] = {
         "OpenAI"    : "OPENAI_API_KEY",
         "Anthropic" : "ANTHROPIC_API_KEY",
-        # Ollama/local: no key needed
+        "Mistral"   : "MISTRAL_API_KEY",
     }
+
+    _vllm_aliases = ("vllm", "vllm-openai", "vllm_compatible", "vlm")
 
     # ---------- public lifecycle ----------
     def __init__(self) -> None:
@@ -565,6 +671,7 @@ class LLMs:
         Initialize legacy vendors immediately (keeps backward compat).
         LiteLLM is lazy-initialized when/if config.use_litellm is True.
         """
+        # Legacy direct API access:
         self.llms: list[dict[str, str]] = [
             {"name": "OpenAI",    "module": "openai",    "env_var": "OPENAI_API_KEY"},
             {"name": "Anthropic", "module": "anthropic", "env_var": "ANTHROPIC_API_KEY"},
@@ -573,10 +680,12 @@ class LLMs:
         self.llm_modules:                  dict[str, ModuleType] = {}
         self.clients:                             dict[str, Any] = {}
 
+        # New LiteLLM configuration:
         self._config:                           LLMConfig | None = None
         self._selected:                         ModelInfo | None = None
         self._candidates_after_filter:           list[ModelInfo] = []
         self._strategies:                  dict[str, StrategyFn] = {}
+        self._last_strategy:                                 str = str(SelectionStrategy.CHEAPEST.value)
         self._pricing_cache: dict[str, tuple[float, float, int]] = {}
         self._litellm_ready:                                bool = False
         self._litellm_mod:                            Any | None = None
@@ -637,7 +746,20 @@ class LLMs:
         cfg = self._resolve_config(config)
         self._config = cfg
 
-        # Shortcut: forced local model
+        if cfg.use_local_model:
+            entry = self.model_info.get(cfg.local_model_name, {})
+            if not entry.get("local", False):
+                raise RuntimeError(f"cfg.use_local_model is {cfg.use_local_model} but '{cfg.local_model_name}' is not marked as local in the registry.")
+            if entry.get("local") is True:
+                provider = entry.get("provider", "Local")
+                if not self._is_provider_available(provider, cfg.local_model_name):
+                    raise RuntimeError(
+                        f"Local model '{cfg.local_model_name}' is not available on runtime "
+                        f"'{entry.get('runtime','unknown')}'. Ensure the runtime is up "
+                        f"(Ollama: {cfg.ollama_base_url}) and that the model is pulled."
+                    )
+
+        # Forced-local short-circuit preserved
         if cfg.use_local_model:
             chosen                        = self._build_model_info(cfg.local_model_name, cfg)
             self._selected                = chosen
@@ -647,36 +769,65 @@ class LLMs:
             self._after_selection(self.model, self.company)
             return
 
-        # Build candidate list with metadata
+        # Build + base filter
         raw_candidates = [self._build_model_info(m, cfg) for m in cfg.candidate_models]
-
-        # Filter by availability & context (and local requirement if present)
         ctx = SelectionContext(
             tokens_in=cfg.assumed_prompt_tokens,
             tokens_out=cfg.assumed_output_tokens,
             min_context_tokens=cfg.min_context_tokens,
-            require_local=False,  # will be set by forced local path above
+            require_local=False,   # "prefer_local" handled in scoring, not filtering
         )
         filtered, reasons_map = self._filter_candidates(raw_candidates, ctx)
 
-        # If filtering removed everything, fall back to unfiltered list
-        effective_candidates          = filtered if filtered else raw_candidates
-        self._candidates_after_filter = effective_candidates
+        # Optional: attempt hard filters for cost/speed only if it won't nuke the pool
+        eff = filtered if filtered else raw_candidates
+        if cfg.max_estimated_cost is not None:
+            tmp = [m for m in eff if m.estimate_cost(cfg.assumed_prompt_tokens,
+                                                     cfg.assumed_output_tokens) <= cfg.max_estimated_cost]
+            if tmp:  # only keep if we still have choices
+                eff = tmp
+        if cfg.speed_floor is not None:
+            tmp = [m for m in eff if (m.speed is not None and m.speed >= cfg.speed_floor)]
+            if tmp:
+                eff = tmp
 
-        # Choose a strategy
-        strategy_name = str(cfg.selection_strategy)
-        strategy_fn   = self._strategies.get(strategy_name)
+        self._candidates_after_filter = eff
+        if not self._candidates_after_filter:
+            raise RuntimeError(
+                "No candidates available after filtering. "
+                "Check allow_local_models, min_context_tokens, candidate_models, and provider availability."
+            )
+
+        # attach reasons to the models we keep
+        for mi in self._candidates_after_filter:
+            mi.meta["filter_reasons"] = reasons_map.get(mi.name, [])
+
+        # Choose strategy: if user signaled multi-objective prefs, prefer the composite strategy
+        if isinstance(cfg.selection_strategy, SelectionStrategy):
+            strategy_name = cfg.selection_strategy.value
+        else:
+            strategy_name = str(cfg.selection_strategy)
+
+        wants_multi = any([
+            cfg.prefer_code, cfg.prefer_low_TTFT, cfg.prefer_local,
+            cfg.max_estimated_cost is not None, cfg.speed_floor is not None,
+            cfg.weight_code_skill > 0.0, cfg.weight_general_skill > 0.0,
+            cfg.weight_TTFT > 0.0, cfg.weight_speed > 0.0, cfg.weight_nonlocal_penalty > 0.0,
+        ])
+        if wants_multi and strategy_name == SelectionStrategy.CHEAPEST.value:
+            strategy_name = "multi_objective"
+        
+        strategy_fn = self._strategies.get(strategy_name)
         if strategy_fn is None:
-            # default to CHEAPEST
-            strategy_fn = self._strategies[SelectionStrategy.CHEAPEST.value]
-
-        # Select winner
-        winner         = strategy_fn(effective_candidates, ctx)
+            strategy_name = SelectionStrategy.CHEAPEST.value
+            strategy_fn = self._strategies[strategy_name]
+        self._last_strategy = strategy_name
+        
+        winner         = strategy_fn(self._candidates_after_filter, ctx)
         self._selected = winner
         self.model     = winner.name
         self.company   = winner.provider
 
-        # Attach filter reasons if requested later
         for mi in raw_candidates:
             if mi.name in reasons_map:
                 mi.meta.setdefault("filter_reasons", reasons_map[mi.name])
@@ -713,59 +864,88 @@ class LLMs:
             # cands already filtered by context; cheapest among them
             return min(cands, key=lambda m: m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
 
-        def performance_then_price(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
-            """Highest performance score, then cheapest among those."""
+        def code_skill_then_price(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
+            """Highest code skill, then cheapest among those."""
             def key(m: ModelInfo) -> tuple[float, float]:
-                """Key function for performance-then-price strategy."""
-                return (-m.performance_score, m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
+                """Key function for code_skill-then-price strategy."""
+                return (-m.code_skill, m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
             return min(cands, key=key)
+
+        def general_skill_then_price(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
+            """Highest general skill, then cheapest among those."""
+            def key(m: ModelInfo) -> tuple[float, float]:
+                """Key function for general_skill-then-price strategy."""
+                return (-m.general_skill, m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
+            return min(cands, key=key)
+
+        def lowest_TTFT(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
+            """Lowest TTFT (Time To First Token) among candidates."""
+            # Treat unknown TTFT as worst; tie-break by price
+            def key(m: ModelInfo):
+                TTFT = m.TTFT if m.TTFT is not None else float("inf")
+                return (TTFT, m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
+            return min(cands, key=key)
+
+        def fastest(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
+            """Fastest model among candidates."""
+            # Highest speed is best; unknown speed is worst; tie-break by price
+            def key(m: ModelInfo):
+                sp = m.speed if m.speed is not None else -1.0
+                # We invert for max; min() will prefer higher speed by sorting negative
+                return (-sp, m.estimate_cost(ctx.tokens_in, ctx.tokens_out))
+            return min(cands, key=key)
+
+        def smallest(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
+            """Model with fewest parameters among candidates."""
+            return min(cands, key=lambda m: m.parameters)
 
         def multi_objective(cands: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo:
             """Using multiple preferences and weights, choose the best-fit model."""
             cfg = self._config or LLMConfig()
 
             # Group stats for normalization
-            costs    = [m.estimate_cost(cfg.assumed_prompt_tokens, cfg.assumed_output_tokens) for m in cands]
-            max_cost = max(costs) if costs else 1.0
+            costs     = [m.estimate_cost(cfg.assumed_prompt_tokens,
+                                         cfg.assumed_output_tokens) for m in cands]
+            max_cost  = max(costs) if costs else 1.0
 
-            ttfts    = [m.ttft_ms for m in cands if m.ttft_ms is not None]
-            max_ttft = max(ttfts) if ttfts else 1.0
+            TTFTs     = [m.TTFT for m in cands if m.TTFT is not None]
+            max_TTFT  = max(TTFTs) if TTFTs else 1.0
 
-            tps_vals = [m.tps for m in cands if m.tps is not None]
-            max_tps  = max(tps_vals) if tps_vals else 1.0
+            speeds    = [m.speed for m in cands if m.speed is not None]
+            max_speed = max(speeds) if speeds else 1.0
 
             def key(m: ModelInfo) -> float:
                 """Key function for multi-objective optimization."""
                 # Hard caps first: if user set max cost, filter; if all filtered, caller will fallback
                 est_cost = m.estimate_cost(cfg.assumed_prompt_tokens, cfg.assumed_output_tokens)
-                if cfg.max_estimated_cost_usd is not None and est_cost > cfg.max_estimated_cost_usd:
+                if cfg.max_estimated_cost is not None and est_cost > cfg.max_estimated_cost:
                     return float("inf")
 
                 # Normalized penalties (0=best)
                 cost_pen = est_cost / max_cost if max_cost > 0 else 0.0
 
-                if m.ttft_ms is not None and max_ttft > 0:
-                    ttft_pen = m.ttft_ms / max_ttft
+                if m.TTFT is not None and max_TTFT > 0:
+                    TTFT_pen = m.TTFT / max_TTFT
                 else:
-                    ttft_pen = 1.0  # unknown => mild penalty if weighted
+                    TTFT_pen = 1.0  # unknown => mild penalty if weighted
 
-                if m.tps is not None and max_tps > 0:
-                    tps_pen = 1.0 - (m.tps / max_tps)  # higher TPS => lower penalty
+                if m.speed is not None and max_speed > 0:
+                    speed_pen = 1.0 - (m.speed / max_speed)  # higher speed => lower penalty
                 else:
-                    tps_pen = 1.0  # unknown TPS
+                    speed_pen = 1.0  # unknown speed
 
                 code_pen = 1.0 - (m.code_skill    if m.code_skill    is not None else _DEFAULT_MODEL_SKILL)
                 gen_pen  = 1.0 - (m.general_skill if m.general_skill is not None else _DEFAULT_MODEL_SKILL)
                 nonlocal_pen = 0.0 if m.is_local else 1.0
 
-                # Optional floor on TPS (soft penalty, not exclusion)
-                if cfg.tps_floor is not None:
-                    if (m.tps is None) or (m.tps < cfg.tps_floor):
-                        tps_pen += 1.0
+                # Optional floor on speed (soft penalty, not exclusion)
+                if cfg.speed_floor is not None:
+                    if (m.speed is None) or (m.speed < cfg.speed_floor):
+                        speed_pen += 1.0
 
                 score = (  cfg.weight_price            * cost_pen
-                         + cfg.weight_ttft             * ttft_pen
-                         + cfg.weight_tps              * tps_pen
+                         + cfg.weight_TTFT             * TTFT_pen
+                         + cfg.weight_speed            * speed_pen
                          + cfg.weight_code_skill       * code_pen
                          + cfg.weight_general_skill    * gen_pen
                          + cfg.weight_nonlocal_penalty * nonlocal_pen)
@@ -773,10 +953,14 @@ class LLMs:
 
             return min(cands, key=key)
 
-        self._strategies[SelectionStrategy.CHEAPEST.value]               = cheapest
-        self._strategies[SelectionStrategy.CONTEXT_THEN_PRICE.value]     = context_then_price
-        self._strategies[SelectionStrategy.PERFORMANCE_THEN_PRICE.value] = performance_then_price
-        self._strategies["multi_objective"]                              = multi_objective
+        self._strategies[SelectionStrategy.CHEAPEST.value]                 = cheapest
+        self._strategies[SelectionStrategy.CONTEXT_THEN_PRICE.value]       = context_then_price
+        self._strategies[SelectionStrategy.CODE_SKILL_THEN_PRICE.value]    = code_skill_then_price
+        self._strategies[SelectionStrategy.GENERAL_SKILL_THEN_PRICE.value] = general_skill_then_price
+        self._strategies[SelectionStrategy.LOWEST_TTFT.value]              = lowest_TTFT
+        self._strategies[SelectionStrategy.FASTEST.value]                  = fastest
+        self._strategies[SelectionStrategy.SMALLEST.value]                 = smallest
+        self._strategies["multi_objective"]                                = multi_objective
 
     # ---------- selection introspection ----------
     def list_candidates(self, with_reasons: bool = False) -> list[ModelInfo]:
@@ -784,7 +968,7 @@ class LLMs:
         Return the candidate list after filtering (or just the selected if forced local).
         If with_reasons=True, include 'filter_reasons' in meta where applicable.
         """
-        res = [replace(mi) for mi in self._candidates_after_filter]
+        res = [replace(mi, meta=dict(mi.meta)) for mi in self._candidates_after_filter]  # deep-copy meta
         if not with_reasons:
             for mi in res:
                 mi.meta.pop("filter_reasons", None)
@@ -798,7 +982,7 @@ class LLMs:
             return {
                 "chosen_model" : None,
                 "provider"     : None,
-                "strategy"     : str(cfg.selection_strategy),
+                "strategy"     : getattr(self, "_last_strategy", str(cfg.selection_strategy)),
                 "explanation"  : "No selection computed yet. Call apply_config().",
             }
         considered = []
@@ -809,10 +993,15 @@ class LLMs:
                 "context_window"        : mi.context_window,
                 "input_cost_per_token"  : mi.input_cost_per_token,
                 "output_cost_per_token" : mi.output_cost_per_token,
-                "performance_score"     : mi.performance_score,
+                "code_skill"            : mi.code_skill,
+                "general_skill"         : mi.general_skill,
+                "TTFT"                  : mi.TTFT,
+                "speed"                 : mi.speed,
                 "estimated_cost"        : mi.estimate_cost(cfg.assumed_prompt_tokens,
                                                            cfg.assumed_output_tokens),
                 "available"             : mi.available,
+                "local"                 : mi.is_local,
+                "runtime"               : mi.runtime,
             })
         return {
             "chosen_model"   : chosen.name,
@@ -820,8 +1009,23 @@ class LLMs:
             "context_window" : chosen.context_window,
             "estimated_cost" : chosen.estimate_cost(cfg.assumed_prompt_tokens,
                                                     cfg.assumed_output_tokens),
-            "strategy"       : str(cfg.selection_strategy),
-            "considered"     : considered,
+            "strategy"       : getattr(self, "_last_strategy", str(cfg.selection_strategy)),
+            "weights"        : {
+                "price"                  : cfg.weight_price,
+                "code_skill"             : cfg.weight_code_skill,
+                "general_skill"          : cfg.weight_general_skill,
+                "TTFT"                   : cfg.weight_TTFT,
+                "speed"                  : cfg.weight_speed,
+                "nonlocal_penalty"       : cfg.weight_nonlocal_penalty,
+            },
+            "prefs": {
+                "prefer_code"            : cfg.prefer_code,
+                "prefer_low_TTFT"        : cfg.prefer_low_TTFT,
+                "prefer_local"           : cfg.prefer_local,
+                "max_estimated_cost"     : cfg.max_estimated_cost,
+                "speed_floor"            : cfg.speed_floor,
+            },
+            "considered": considered,
         }
 
     # ---------- core send method (stable) ----------
@@ -884,20 +1088,23 @@ class LLMs:
     # ====================================================
     def _default_candidate_models(self) -> list[str]:
         """Return a sane default list combining remote + local names."""
-        return list(self._DEFAULT_CANDIDATES)
-
-    def _default_model_scores(self) -> dict[str, float]:
-        """Return default performance scores; caller can merge env/JSON."""
-        return dict(self._DEFAULT_MODEL_SCORES)
+        return list(self.model_info.keys())
 
     def _extra_litellm_args_for(self, model: str) -> dict[str, Any]:
         """
         Per-model transport args for LiteLLM (e.g., {'api_base': self.ollama_base_url}
-        for 'ollama/*'). Default returns {}.
+        for "runtime == "Ollama"). Default returns {}.
         """
-        cfg = self._config or LLMConfig()
-        if model.startswith("ollama/"):
-            return {"api_base": cfg.ollama_base_url}
+        cfg   = self._config or LLMConfig()
+        entry = self.model_info.get(model, {})
+        runtime = (entry.get("runtime") or "").strip().casefold()
+        if entry.get("local") is True and runtime:
+            if runtime == "ollama":
+                base = (cfg.ollama_base_url or "").rstrip("/")
+                return {"api_base": base} if base else {}
+            if runtime in self._vllm_aliases:
+                base = (cfg.vllm_base_url or "").rstrip("/")
+                return {"api_base": base} if base else {}
         return {}
 
     def _after_selection(self, model: str, provider: str) -> None:
@@ -907,44 +1114,51 @@ class LLMs:
     # ====================================================
     # internals
     # ====================================================
+
     def _resolve_config(self, config: LLMConfig) -> LLMConfig:
         """Hydrate defaults: candidates, scores (with env JSON merge)."""
-        import json
         # Candidate models
         cands = list(config.candidate_models) if config.candidate_models else self._default_candidate_models()
-        if not (config.allow_local_models):
-            cands = [m for m in cands if not m.startswith("ollama/")]
+        if not config.allow_local_models:
+            cands = [m for m in cands if not self.model_info.get(m, {}).get("local", False)]
 
-        # Model scores: default + env JSON override + config.model_scores
-        scores = self._default_model_scores()
+        # Merge env JSON (if present) into cfg.model_scores; allow both float and {'code','general'} forms
+        scores    = dict(config.model_scores)  # copy
         json_path = os.getenv("LLM_MODEL_SCORES_JSON")
         if json_path:
             try:
-                with open(json_path, "r", encoding="utf-8") as f:
+                import json
+                with open(json_path, "r", encoding=DEFAULT_ENCODING) as f:
                     data = json.load(f)
-                for k, v in data.items():
-                    try:
-                        scores[k] = float(v)
-                    except Exception:
-                        logging.warning("Invalid score for %s in %s; skipping", k, json_path)
+                if isinstance(data, dict):
+                    scores.update(data)
             except Exception as e:
                 logging.warning("Failed to load LLM_MODEL_SCORES_JSON from %s: %s", json_path, e)
-        # Merge config-provided scores
-        for k, v in config.model_scores.items():
-            try:
-                scores[k] = float(v)
-            except Exception:
-                logging.warning("Invalid score for %s in config.model_scores; skipping", k)
+
+        if not config.use_litellm:
+            cands = [m for m in cands if not self.model_info.get(m, {}).get("local", False)]
 
         hydrated = replace(config, candidate_models=cands, model_scores=scores)
+
+        # If user flipped prefs but left weights at 0, inject reasonable defaults.
+        # Price stays at 1.0 unless user overrides.
+        if hydrated.prefer_code and hydrated.weight_code_skill == 0.0:
+            hydrated = replace(hydrated, weight_code_skill=0.60)
+        if hydrated.prefer_low_TTFT and hydrated.weight_TTFT == 0.0:
+            hydrated = replace(hydrated, weight_TTFT=0.40)
+        if hydrated.prefer_local and hydrated.weight_nonlocal_penalty == 0.0:
+            hydrated = replace(hydrated, weight_nonlocal_penalty=0.30)
+        # You can optionally bias throughput when TTFT isn't critical
+        if hydrated.weight_speed == 0.0 and not hydrated.prefer_low_TTFT and hydrated.speed_floor:
+            hydrated = replace(hydrated, weight_speed=0.20)
+
         return hydrated
 
     def _filter_candidates(self, candidates: list[ModelInfo],
                            ctx: SelectionContext) -> tuple[list[ModelInfo], dict[str, list[str]]]:
         """Filter by availability, context, and optional locality. Return filtered list and reasons per model name."""
-        filtered:     list[ModelInfo] = []
+        filtered: list[ModelInfo] = []
         reasons: dict[str, list[str]] = {}
-
         for mi in candidates:
             r: list[str] = []
             if not mi.available:
@@ -957,57 +1171,83 @@ class LLMs:
                 reasons[mi.name] = r
             else:
                 filtered.append(mi)
-
+                reasons[mi.name] = []  # << capture “no reasons” for included models
         return filtered, reasons
 
-    def _provider_for(self, model: str) -> str:
-        """Infer provider from model name prefix."""
-        if model.startswith("ollama/"):
-            return "Ollama"
-        if model.startswith("gpt-") or model.startswith("o1-"):
-            return "OpenAI"
-        if model.startswith("claude-"):
-            return "Anthropic"
-        return "LiteLLM"
-
-    def _is_provider_available(self, provider: str) -> bool:
+    def _is_provider_available(self, provider: str, model: str) -> bool:
         """Check if a model provider is available."""
-        if provider == "Ollama":
-            return True  # assume local endpoint reachable
-        env_var = self._PROVIDER_ENV.get(provider)
+        entry = self.model_info.get(model, {})
+        if entry.get("local") is True:
+            runtime = (entry.get("runtime") or "").strip().casefold()
+
+            if runtime == "ollama":
+                cfg = self._config or LLMConfig()
+                base = (cfg.ollama_base_url or "").rstrip("/")
+                if not base:
+                    return False
+
+                # Ping /api/tags to ensure server is up and to list pulled models
+                data = self._http_get_json(f"{base}/api/tags", timeout=2.0)
+                if not isinstance(data, dict):
+                    return False
+
+                models = data.get("models", [])
+                if not isinstance(models, list):
+                    return False
+
+                # Build installed set
+                installed = set()
+                for m in models:
+                    name = (m.get("name") or m.get("model"))
+                    if isinstance(name, str):
+                        installed.add(name.strip().lower())
+
+                # Derive the tag from the registry key (no extra fields required)
+                target = self._derive_ollama_tag(model, runtime)
+                if not target:
+                    return False  # runtime mismatch or empty tag
+
+                # Match directly; (optional) also accept ':latest' normalization
+                if target in installed:
+                    return True
+                if not target.endswith(":latest") and f"{target}:latest" in installed:
+                    return True
+                return False
+
+            # ---- vLLM: (not implemented yet) ----
+            if runtime in self._vllm_aliases:
+                return False
+
+            # Unknown local runtime → not available
+            return False
+
+        # Non-local: require env var only if we know one for that provider
+        env_var = self._provider_env.get(provider)
         if not env_var:
             return True
         return env_var in os.environ
 
     def _build_model_info(self, model: str, cfg: LLMConfig) -> ModelInfo:
         """Build ModelInfo for a given model name, using config and defaults as needed."""
-        provider               = self._provider_for(model)
-        available              = self._is_provider_available(provider)
+        entry     = self.model_info.get(model, {})
+        provider  = entry.get("provider", "Unknown")
+        available = self._is_provider_available(provider, model)
         in_cost, out_cost, ctx = self._get_model_pricing_and_context(model)
 
         # ---- pull skills / speed from defaults if present; fallback safely ----
-        try:
-            code_skill = self.DEFAULT_CODE_SKILL.get(model, cfg.model_scores.get(model, _DEFAULT_MODEL_SKILL))
-        except NameError:
-            code_skill = cfg.model_scores.get(model, _DEFAULT_MODEL_SKILL)
+        code_skill = self._score_override(cfg, model, "code")
+        if code_skill is None:
+            code_skill = float(entry.get("code_skill", _DEFAULT_MODEL_SKILL))
+        general_skill = self._score_override(cfg, model, "general")
+        if general_skill is None:
+            general_skill = float(entry.get("general_skill", _DEFAULT_MODEL_SKILL))
+        TTFT       = entry.get("TTFT")
+        speed      = entry.get("speed")
+        parameters = entry.get("parameters", _DEFAULT_MODEL_PARAMETERS)
+        is_local   = bool(entry.get("local", False))
+        runtime    = entry.get("runtime")
 
-        try:
-            general_skill = self.DEFAULT_GENERAL_SKILL.get(model, _DEFAULT_MODEL_SKILL)
-        except NameError:
-            general_skill = _DEFAULT_MODEL_SKILL
-
-        try:
-            ttft_ms = self.DEFAULT_TTFT_MS.get(model, None)
-        except NameError:
-            ttft_ms = None
-
-        try:
-            tps = self.DEFAULT_TOKENS_PER_SEC.get(model, None)
-        except NameError:
-            tps = None
-
-        is_local = model.startswith("ollama/")
-        meta: dict[str, Any] = {"provider": provider, "pricing_source": "cache_or_litellm_or_fallback"}
+        meta: dict[str, Any] = {"pricing_source": "cache_or_litellm_or_fallback"}
 
         return ModelInfo(
             name=model,
@@ -1015,13 +1255,14 @@ class LLMs:
             context_window=ctx,
             input_cost_per_token=in_cost,
             output_cost_per_token=out_cost,
-            is_local=is_local,
             available=available,
-            performance_score=float(code_skill),  # back-compat
+            is_local=is_local,
+            parameters=parameters,
+            runtime=runtime,
             code_skill=float(code_skill),
             general_skill=float(general_skill),
-            ttft_ms=ttft_ms,
-            tps=tps,
+            TTFT=TTFT,
+            speed=speed,
             meta=meta,
         )
 
@@ -1036,31 +1277,62 @@ class LLMs:
         except ImportError as e:
             my_critical_error(f"LiteLLM is enabled but not installed. `pip install litellm` Error: {e}")
 
+    def _http_get_json(self, url: str, timeout: float = 2.0) -> dict[str, Any] | None:
+        """Helper to GET a URL and parse JSON, returning None on any failure."""
+        from urllib import request, error
+        req = request.Request(url, headers={"Accept": "application/json"})
+        try:
+            with request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+        except (error.URLError, error.HTTPError, TimeoutError):
+            return None
+        try:
+            import json
+            return json.loads(raw.decode(DEFAULT_ENCODING))
+        except Exception:
+            return None
+
+    def _derive_ollama_tag(self, model: str, runtime: str | None) -> str:
+        """
+        Map your registry key to an Ollama tag without needing extra registry fields.
+        Rules:
+        - If the model key starts with 'ollama/', strip that prefix and use the rest.
+        - Else, if runtime is ollama, assume the key itself is the tag.
+        - Normalize to lowercase for matching against /api/tags results.
+        """
+        r = (runtime or "").strip().casefold()
+        tag = model
+        if model.startswith("ollama/"):
+            tag = model[len("ollama/") :]
+        return tag.strip().lower() if r == "ollama" else ""
+
     # Pricing/context helpers with caching
+
     def _get_model_pricing_and_context(self, model: str) -> tuple[float, float, int]:
         """
         Returns (input_cost_per_token, output_cost_per_token, context_window).
         Prices normalized to $/token (not per-1k). Unknown remote prices get a very high sentinel;
-        local (ollama/*) always returns 0 for both.
+        local models always return 0 for both.
         """
         if model in self._pricing_cache:
             return self._pricing_cache[model]
 
-        # Local pricing convention: free ($0)
-        if model.startswith("ollama/"):
-            ctx = self._DEFAULT_CONTEXT.get(model, 8192)
-            self._pricing_cache[model] = (0.0, 0.0, ctx)
+        entry = self.model_info.get(model, {})
+
+        # Local models: $0 and registry context
+        if entry.get("local") is True:
+            ctx = int(entry.get("context", _DEFAULT_MODEL_CONTEXT))
+            in_cost = out_cost = 0.0
+            self._pricing_cache[model] = (in_cost, out_cost, ctx)
             return self._pricing_cache[model]
 
+        # ---- non-local path ----
         in_cost  = None
         out_cost = None
-        context  = self._DEFAULT_CONTEXT.get(model, 8192)
+        context  = int(entry.get("context", _DEFAULT_MODEL_CONTEXT))
 
         try:
-            # Only import if needed; use LiteLLM if present (even if routing legacy)
             import litellm  # type: ignore
-
-            # Try get_model_info if available
             info_fn = getattr(litellm, "get_model_info", None)
             md = {}
             if callable(info_fn):
@@ -1069,11 +1341,8 @@ class LLMs:
                 except Exception:
                     md = {}
 
-            # Try common key paths
-            # Per-token
             cpit    = self._deep_get(md, ["input_cost_per_token"])
             cppt    = self._deep_get(md, ["output_cost_per_token"])
-            # Per-1k
             cpik    = self._deep_get(md, ["input_cost_per_1k_tokens"])
             cpok    = self._deep_get(md, ["output_cost_per_1k_tokens"])
             max_ctx = self._deep_get(md, ["max_input_tokens"]) or self._deep_get(md, ["max_tokens"])
@@ -1084,22 +1353,20 @@ class LLMs:
                 except Exception:
                     pass
 
-            # Fill costs
             if cpit is not None and cppt is not None:
                 in_cost, out_cost = float(cpit), float(cppt)
             elif cpik is not None and cpok is not None:
                 in_cost, out_cost = float(cpik) / 1000.0, float(cpok) / 1000.0
 
-            # Fallback to model_cost map
             if in_cost is None or out_cost is None:
                 cost_map = getattr(litellm, "model_cost", None) or getattr(litellm, "litellm_model_cost", None)
                 if isinstance(cost_map, dict) and model in cost_map:
                     row = cost_map[model]
                     if in_cost is None:
                         if "input_cost_per_token" in row:
-                            in_cost  = float(row["input_cost_per_token"])
+                            in_cost = float(row["input_cost_per_token"])
                         elif "input_cost_per_1k_tokens" in row:
-                            in_cost  = float(row["input_cost_per_1k_tokens"]) / 1000.0
+                            in_cost = float(row["input_cost_per_1k_tokens"]) / 1000.0
                     if out_cost is None:
                         if "output_cost_per_token" in row:
                             out_cost = float(row["output_cost_per_token"])
@@ -1107,25 +1374,14 @@ class LLMs:
                             out_cost = float(row["output_cost_per_1k_tokens"]) / 1000.0
 
         except Exception as e:
-            # LiteLLM not installed or metadata lookup failed — we'll use fallbacks below
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("LiteLLM pricing/context lookup failed for %s: %s", model, e)
+            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                "LiteLLM pricing/context lookup failed for %s: %s", model, e
+            )
 
-        # Finalize with fallbacks/sentinels
         if in_cost is None:
-            in_cost  = 9e9  # de-prioritize unknown cost
+            in_cost = 9e9
         if out_cost is None:
             out_cost = 9e9
-
-        # Apply explicit overrides if you provided them (e.g., local = $0)
-        try:
-            overrides = self.DEFAULT_PRICE_OVERRIDES_PER_1M
-        except NameError:
-            overrides = {}
-
-        if model in overrides:
-            in_million, out_million = overrides[model]
-            in_cost  = float(in_million)  / 1_000_000.0
-            out_cost = float(out_million) / 1_000_000.0
 
         self._pricing_cache[model] = (float(in_cost), float(out_cost), int(context))
         return self._pricing_cache[model]
@@ -1159,6 +1415,143 @@ class LLMs:
             pass
         # As last resort, stringify
         return str(resp)
+
+    def _score_override(self, cfg: LLMConfig, model: str, which: str) -> float | None:
+        """
+        which: 'code' or 'general'
+        Accepts cfg.model_scores[model] as float (code only) or dict with keys 'code'/'general'.
+        """
+        if not cfg.model_scores:
+            return None
+        val = cfg.model_scores.get(model)
+        if val is None:
+            return None
+        if isinstance(val, (int, float)):
+            return float(val) if which == "code" else None
+        if isinstance(val, dict):
+            v = val.get(which)
+            return float(v) if v is not None else None
+        return None
+
+    def tokenize(self, text: str, model: str | None = None) -> int:
+        """
+        Return the number of tokens in `text` under the tokenizer best-suited to `model`.
+
+        Preference order:
+        1) Local Ollama runtime -> call /api/tokenize
+        2) LiteLLM's token counters (if importable)
+        3) tiktoken with OpenAI-family heuristics (o200k_base vs cl100k_base)
+        4) Rough heuristic fallback
+
+        Args:
+            text: The input text to tokenize.
+            model: The model to use for tokenization (optional).
+
+        Returns:
+            The number of tokens in the input text.
+
+        Raises:
+            ValueError: If tokenization fails.
+        """
+        if not text:
+            return 0
+
+        if model is None:
+            model = getattr(self, "model", None) or ""
+
+        entry    = self.model_info.get(model, {})
+        runtime  = (entry.get("runtime") or "").strip().casefold()
+        is_local = bool(entry.get("local", False))
+        provider = (entry.get("provider") or "").strip()
+
+        # --- 1) Local Ollama: ask the server's tokenizer directly ---
+        if is_local and runtime == "ollama":
+            cfg  = self._config or LLMConfig()
+            base = (cfg.ollama_base_url or "").rstrip("/")
+            tag  = self._derive_ollama_tag(model, "ollama")
+            if base and tag:
+                try:
+                    import json
+                    from urllib import request
+                    payload = json.dumps({"model": tag, "prompt": text}).encode("utf-8")
+                    req = request.Request(f"{base}/api/tokenize",
+                                        data=payload,
+                                        headers={"Content-Type": "application/json"})
+                    with request.urlopen(req, timeout=2.0) as resp:
+                        raw = resp.read()
+                    data = json.loads(raw.decode("utf-8", "replace"))
+                    toks = data.get("tokens")
+                    if isinstance(toks, list):
+                        return len(toks)
+                except Exception:
+                    # fall through to other methods
+                    pass
+
+        # --- 2) LiteLLM counters (if the library is available) ---
+        try:
+            import importlib
+            litellm = importlib.import_module("litellm")  # type: ignore
+
+            # Preferred: get_num_tokens(model=..., text=...)
+            get_num_tokens = getattr(litellm, "get_num_tokens", None)
+            if callable(get_num_tokens):
+                try:
+                    return int(get_num_tokens(model=model, text=text))
+                except Exception:
+                    pass
+
+            # Fallbacks: token_counter APIs across versions
+            token_counter = getattr(litellm, "token_counter", None)
+            if token_counter:
+                # Some versions accept raw text
+                try:
+                    out = token_counter(model=model, text=text)
+                    if isinstance(out, int):
+                        return int(out)
+                except Exception:
+                    pass
+                # Others want chat messages, returning a dict
+                try:
+                    out = token_counter(model=model, messages=[{"role": "user", "content": text}])
+                    if isinstance(out, dict):
+                        for k in ("input_tokens", "total_tokens", "num_tokens"):
+                            v = out.get(k)
+                            if isinstance(v, (int, float)):
+                                return int(v)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # --- 3) tiktoken heuristics (works well for OpenAI families) ---
+        try:
+            import tiktoken  # type: ignore
+
+            enc_name = "cl100k_base"
+            m = model.lower()
+
+            # Use o200k_base for OpenAI's o*/4o/4.1/5 families (long-context tokenization)
+            if provider == "OpenAI" or m.startswith(("gpt", "o")):
+                if any(x in m for x in ("gpt-4.1", "gpt-4o", "gpt-5", "o1", "o3", "o4", "4.1", "4o")):
+                    enc_name = "o200k_base"
+
+            try:
+                enc = tiktoken.get_encoding(enc_name)
+            except Exception:
+                enc = tiktoken.get_encoding("cl100k_base")
+
+            return len(enc.encode(text))
+        except Exception:
+            pass
+
+        # --- 4) Rough heuristic fallback (no libs / no server tokenizer) ---
+        import math, re
+        s = text if isinstance(text, str) else str(text)
+        # Count word-like + punctuation chunks; ensure at least 1
+        rough = len(re.findall(r"\w+|[^\s\w]", s, flags=re.UNICODE))
+        if rough == 0:
+            rough = math.ceil(len(s) / 4.0) or 1
+        return int(rough)
 
 
 class MemoryHandler(logging.Handler):
@@ -1747,7 +2140,7 @@ def get_hostname_subprocess_hostname(rawlog: bool = False) -> str | None:
 
 def get_hostname_subprocess_scutil(rawlog: bool = False) -> str | None:
     """Retrieves the hostname using the 'scutil --get ComputerName' command on macOS via subprocess."""
-    if sys.platform == 'darwin':
+    if sys.platform == "darwin":
         try:
             import subprocess
             result = subprocess.run(['scutil', '--get', 'ComputerName'],
@@ -1780,7 +2173,7 @@ def get_computer_name(rawlog: bool = False) -> str:
         'subprocess_hostname': get_hostname_subprocess_hostname,
     }
 
-    if sys.platform == 'darwin':  # This next method is macOS-specific
+    if sys.platform == "darwin":  # This next method is macOS-specific
         methods['subprocess_scutil_computername'] = get_hostname_subprocess_scutil
 
     results = {}
@@ -1844,6 +2237,516 @@ def analyze_computer_name_results(results: dict[str, str], rawlog: bool = False)
             logging.warning(the_string)
 
         return primary_name
+
+
+#########################################
+# Internals for is_internet_available():
+#########################################
+
+# Numeric IPs (no DNS required) on common ports to check raw connectivity.
+# Keep these very stable, globally reachable, and from different operators.
+IPV4_TARGETS: list[tuple[str, int]] = [
+    ("1.1.1.1",        443),  # Cloudflare
+    ("8.8.8.8",        853),  # Google Public DNS over TLS (TCP)
+    ("9.9.9.9",        443),  # Quad9
+    ("208.67.222.222", 443),  # Cisco OpenDNS
+]
+
+IPV6_TARGETS: list[tuple[str, int]] = [
+    ("2606:4700:4700::1111", 443),  # Cloudflare
+    ("2001:4860:4860::8888",  53),  # Google Public DNS (TCP)
+]
+
+# HTTP(S) probes:
+# - gstatic 204 endpoints are explicitly designed for connectivity checks.
+# - msftconnecttest verifies plain HTTP reachability and expected content.
+HTTP_PROBES: list[dict[str, Any]] = [
+    {
+        "url"    : "https://www.gstatic.com/generate_204",
+        "method" : "GET",
+        "expect" : {"status": 204},
+        "note"   : "Android/gstatic 204 probe",
+    },
+    {
+        "url"    : "http://www.gstatic.com/generate_204",
+        "method" : "GET",
+        "expect" : {"status": 204, "length_max": 0},
+        "note"   : "HTTP 204 (checks for captive portal redirects)",
+    },
+    {
+        "url"     : "http://www.msftconnecttest.com/connecttest.txt",
+        "method"  : "GET",
+        "expect"  : {"status": 200, "substr": "Microsoft Connect Test"},
+        "note"    : "Microsoft connect test",
+    },
+]
+
+# DNS names to resolve (if DNS is healthy, at least one should work).
+DNS_TEST_NAMES: list[str] = [
+    "example.com",      # IANA
+    "cloudflare.com",   # Cloudflare
+    "google.com",       # Google
+    "one.one.one.one",  # Cloudflare DNS name (usually uncached locally)
+    "dns.google",       # Google DNS name
+]
+
+
+def _tcp_connect(host: str, port: int, timeout: float) -> bool:
+    """
+    Attempt a TCP connection to a numeric IP address.
+
+    Args:
+        host:    Numeric IP address (IPv4/IPv6) as a string.
+        port:    Destination TCP port number.
+        timeout: Per-attempt timeout (seconds).
+
+    Returns:
+        True if TCP connection is successfully established, otherwise False.
+
+    Raises:
+        None (errors are caught and logged at DEBUG level).
+    """
+    try:
+        import socket
+        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("TCP: connecting to %s:%d (timeout=%f)", host, port, timeout)
+        with socket.create_connection((host, port), timeout=timeout):
+            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("TCP: success %s:%d", host, port)
+            return True
+    except OSError as exc:
+        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("TCP: failure %s:%d (%s)", host, port, exc)
+        return False
+
+
+def _dns_resolve(name: str, timeout: float) -> bool:
+    """
+    Try resolving a hostname using the system resolver.
+
+    Args:
+        name:    Hostname to resolve.
+        timeout: Per-attempt timeout (seconds).
+
+    Returns:
+        True if resolution returns at least one address, else False.
+
+    Raises:
+        None.
+    """
+    # socket has no per-call DNS timeout, so use global default temporarily.
+    import socket
+    default_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(timeout)
+    try:
+        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("DNS: resolving %s (timeout=%f)", name, timeout)
+        res = socket.getaddrinfo(name, None, type=socket.SOCK_STREAM)
+        ok  = len(res) > 0
+        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("DNS: %s for %s", 'success' if ok else 'empty result', name)
+        return ok
+    except OSError as exc:
+        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("DNS: failure for %s (%s)", name, exc)
+        return False
+    finally:
+        socket.setdefaulttimeout(default_timeout)
+
+
+def _build_http_opener(ignore_proxies: bool) -> urllib.request.OpenerDirector:
+    """
+    Build a URL opener honoring or ignoring proxies, with a bound TLS context.
+
+    Args:
+        ignore_proxies: Whether to bypass environment proxy settings.
+
+    Returns:
+        Configured opener with HTTPSHandler(context=...).
+    """
+    import ssl
+    import urllib.request
+    context:  ssl.SSLContext = ssl.create_default_context()
+    handlers: list[Any]      = [
+        urllib.request.ProxyHandler({} if ignore_proxies else None),  # {} = bypass; None = from env
+        urllib.request.HTTPSHandler(context=context),
+    ]
+    return urllib.request.build_opener(*handlers)
+
+
+def _http_probe(url: str, method: str, timeout: float,
+                opener: urllib.request.OpenerDirector) -> tuple[bool, int | None, bytes | None, str | None]:
+    """
+    Perform an HTTP(S) probe (HEAD/GET) to a known endpoint.
+
+    Args:
+        url:     Target URL.
+        method:  HTTP method ('HEAD' or 'GET').
+        timeout: Timeout in seconds.
+        opener:  Pre-configured opener (proxy/no-proxy).
+
+    Returns:
+        (success, status_code, body_bytes_or_None, final_url_if_redirected)
+
+    Raises:
+        None.
+    """
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(url=url, method=method)
+    # Add a small UA header to reduce the chance of odd blocks:
+    req.add_header("User-Agent", f"{Path(sys.argv[0]).stem}/{__version__} (+python-urllib)")
+
+    try:
+        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HTTP: %s %s (timeout=%f)", method, url, timeout)
+        with opener.open(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", None) or resp.getcode()
+            data   = b""
+            final_url = resp.geturl()
+            # For HEAD we don't generally read a body; for GET, read up to a ceiling.
+            if method.upper() == "GET":
+                # Cap read size to avoid hanging on big captive pages.
+                data = resp.read(2048)
+            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HTTP: %s %s -> %d, final_url=%s", method, url, status, final_url)
+            return True, int(status), data, final_url
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read(2048) if hasattr(exc, "read") else None
+        except Exception:
+            body = None
+        final_url = exc.geturl() if hasattr(exc, "geturl") else None  # ← keep this
+        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HTTP: HTTPError %s %s -> %d", method, url, exc.code)
+        return False, int(exc.code), body, final_url
+    except Exception as exc:
+        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HTTP: failure %s %s (%s)", method, url, exc)
+        return False, None, None, None
+
+
+def _http_meets_expectations(status: int | None, body: bytes | None, expect: dict[str, Any]) -> bool:
+    """
+    Validate HTTP response against expectations.
+
+    Args:
+        status: HTTP status code (or None on failure).
+        body:   Response body (None for HEAD or on failure).
+        expect: Dict of constraints, e.g.:
+                {
+                    "status"     : 204,
+                    "length_max" : 0,
+                    "substr"     : "Microsoft Connect Test",
+                }
+
+    Returns:
+        True if all applicable expectations are met, else False.
+
+    Raises:
+        None.
+    """
+    if status is None:
+        return False
+
+    if "status" in expect and status != int(expect["status"]):
+        return False
+
+    if "length_max" in expect and body is not None:
+        if len(body) > int(expect["length_max"]):
+            return False
+
+    if "substr" in expect and body is not None:
+        try:
+            text = body.decode("utf-8", errors="ignore")
+        except Exception:
+            text = ""
+        if str(expect["substr"]) not in text:
+            return False
+
+    return True
+
+
+def _looks_like_captive(status: int | None, final_url: str | None, body: bytes | None) -> bool:
+    """
+    Heuristic to detect captive portals:
+      - Unexpected 200/30x with HTML body where 204 is expected.
+      - Status 511 (Network Authentication Required).
+      - Redirects to login/portal-like URLs.
+
+    Args:
+        status:    HTTP status (or None).
+        final_url: Final URL after redirects (or None).
+        body:      Response body (or None).
+
+    Returns:
+        True if it appears to be a captive portal, else False.
+
+    Raises:
+        None.
+    """
+    if status is None:
+        return False
+    if status == 511:   # Network Authentication Required
+        return True
+    if status in (301, 302, 303, 307, 308):
+        return True
+    b = (body or b"")[:256].lower()
+    if status == 204 and b:
+        return True
+    if status == 200 and b:
+        if b"<html" in b or b"login" in b or b"captive" in b or b"portal" in b:
+            return True
+    if final_url:
+        fu = final_url.lower()
+        if any(k in fu for k in ("login", "captive", "portal", "hotspot", "walledgarden")):
+            return True
+    return False
+
+
+def _should_use_proc_cap() -> bool:
+    """
+    Return True only on POSIX systems where RLIMIT_NPROC is available.
+    Avoids calling into Unix-only modules on Windows.
+    """
+    try:
+        import os, resource  # type: ignore
+        return os.name == "posix" and hasattr(resource, "RLIMIT_NPROC")
+    except Exception:
+        return False
+
+
+def _advisory_user_proc_limit_cap(current_cap: int) -> int:
+    """
+    Softly cap workers to ~75% of the per-user process limit (where applicable).
+    Threads usually don't count as separate "processes" everywhere, so treat this
+    as an advisory upper bound, not a guarantee.
+    """
+    try:
+        import resource  # type: ignore
+        soft, _hard = resource.getrlimit(resource.RLIMIT_NPROC)
+        inf         = getattr(resource, "RLIM_INFINITY", -1)
+        # If unlimited or nonsensical, do nothing.
+        if soft in (inf, -1) or soft is None or soft <= 0:
+            return current_cap
+        cap         = max(1, int(soft * 0.75))
+        return min(current_cap, cap)
+    except Exception:
+        return current_cap
+
+
+def _effective_workers(requested: int, num_tasks: int, io_bound: bool = True) -> int:
+    """
+    Choose a sensible max_workers value.
+
+    Args:
+        requested: Desired worker count from CLI.
+        num_tasks: Number of concurrent tasks you will submit.
+        io_bound:  Whether the workload is primarily I/O bound.
+
+    Returns:
+        A worker count >= 1 and no larger than the task count and a heuristic cap.
+
+    Raises:
+        None
+    """
+    cpu:       int = os.cpu_count() or 1
+    # Heuristic caps: generous for I/O, conservative for CPU-bound.
+    cap:       int = 64 if io_bound else max(1, cpu)
+    n:         int = min(requested, num_tasks, cap)
+    if _should_use_proc_cap():
+        n = _advisory_user_proc_limit_cap(n)
+    return max(1, n)
+
+
+def _run_tcp_checks_with_pool(tcp_targets: list[tuple[str, int]],
+                              timeout: float, requested_workers: int) -> bool:
+    """
+    Run the TCP checks using a thread pool with safe sizing and backoff.
+
+    Args:
+        tcp_targets:       (host, port) pairs to probe.
+        timeout:           Per-connection timeout in seconds.
+        requested_workers: CLI-requested max worker count.
+
+    Returns:
+        True if any TCP connection succeeded, else False.
+
+    Raises:
+        None (creation failures are handled with backoff and logging).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # 1) Never spawn more workers than concurrent tasks; pick a safe cap.
+    n_workers: int = _effective_workers(requested=requested_workers,
+                                        num_tasks=len(tcp_targets),
+                                        io_bound=True)
+
+    # 2) Backoff plan if the OS refuses to create that many threads.
+    #    Try n, then n//2, then 1.
+    backoff_plan: list[int] = [n_workers, max(1, n_workers // 2), 1]
+
+    for n in backoff_plan:
+        try:
+            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("ThreadPool: attempting max_workers=%d", n)
+            with ThreadPoolExecutor(max_workers=n) as pool:
+                futures = {pool.submit(_tcp_connect, h, p, timeout): (h, p) for (h, p) in tcp_targets}
+                for fut in as_completed(futures):
+                    try:
+                        if fut.result():
+                            try:  # Optional: stop launching/awaiting more work asap
+                                pool.shutdown(cancel_futures=True)
+                            except TypeError:  # Python < 3.9 doesn’t support cancel_futures
+                                pass
+                            return True
+                    except Exception as exc:
+                        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("TCP: unexpected exception: %s", exc)
+            return False
+        except (RuntimeError, OSError, MemoryError) as exc:
+            logging.warning("Could not start thread pool with %d workers (%s). Trying fewer.", n, exc)
+            continue
+
+    # If even 1 worker fails, consider TCP unreachable.
+    return False
+
+
+@dataclass
+class CheckResult:
+    """Aggregate results from the multi-strategy connectivity check."""
+    tcp_ok:           bool
+    dns_ok:           bool
+    http_ok:          bool
+    captive_detected: bool
+
+
+def _check_once(timeout: float, workers: int,
+                include_ipv6: bool, ignore_proxies: bool) -> CheckResult:
+    """
+    Perform one pass of the connectivity checks.
+
+    Args:
+        timeout:        Per-attempt timeout in seconds.
+        workers:        Thread pool size for parallel network attempts.
+        include_ipv6:   Whether to include IPv6 TCP targets.
+        ignore_proxies: If True, bypass env proxies for HTTP probes.
+
+    Returns:
+        CheckResult with booleans for TCP, DNS, HTTP, and captive portal detection.
+
+    Raises:
+        None.
+    """
+    import socket
+    tcp_targets: list[tuple[str, int]] = IPV4_TARGETS.copy()
+    if include_ipv6 and getattr(socket, "has_ipv6", False):
+        tcp_targets.extend(IPV6_TARGETS)
+
+    dns_ok:           bool = False
+    http_ok:          bool = False
+    captive_detected: bool = False
+
+    # --- TCP connectivity to numeric IPs (with safe sizing & backoff) ---
+    tcp_ok: bool = _run_tcp_checks_with_pool(tcp_targets=tcp_targets,
+                                            timeout=timeout,
+                                            requested_workers=workers)
+
+    # --- DNS resolution (sequential with quick bail-out) ---
+    for name in DNS_TEST_NAMES:
+        if _dns_resolve(name, timeout=timeout):
+            dns_ok = True
+            break
+
+    # --- HTTP probes (sequential, quick bail-outs) ---
+    opener = _build_http_opener(ignore_proxies=ignore_proxies)
+    for probe in HTTP_PROBES:
+        ok, status, body, final_url = _http_probe(
+            url=probe["url"],
+            method=probe["method"],
+            timeout=timeout,
+            opener=opener,
+        )
+        if ok and _http_meets_expectations(status, body, probe["expect"]):
+            http_ok = True
+            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HTTP probe OK: %s", probe['note'])
+            break
+        # Any strong hints of a captive portal?
+        if _looks_like_captive(status, final_url, body):
+            captive_detected = True
+            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Captive portal suspected at %s (status=%d, final_url=%s)", probe['url'], status, final_url)
+            # We can stop early—being behind a captive portal ≠ usable internet.
+            break
+
+    return CheckResult(
+        tcp_ok=tcp_ok,
+        dns_ok=dns_ok,
+        http_ok=http_ok,
+        captive_detected=captive_detected,
+    )
+
+
+def is_internet_available(timeout_per_step: float = 2.5,
+                          retries:            int = 1,
+                          workers:            int = 6,
+                          include_ipv6:      bool = False,
+                          strict:            bool = False,
+                          ignore_proxies:    bool = False) -> bool:
+    """
+    Determine if the internet is available using multiple methods.
+
+    Strategy (per attempt):
+        1) TCP to multiple well-known numeric IPs (no DNS).
+        2) DNS resolution of common hostnames.
+        3) HTTP(S) probes with expectations and captive-portal detection.
+
+    Aggregation logic:
+        - If captive portal is detected -> return False immediately.
+        - If any HTTP probe passes expectations -> return True.
+        - Else if TCP OK and DNS OK -> return True.
+        - Else:
+            * If strict is False and TCP OK alone -> return False
+              (raw TCP alone is not considered sufficient for "internet usable").
+            * If strict is True -> still False.
+
+    Args:
+        timeout_per_step: Timeout (seconds) per individual network attempt.
+        retries:          Number of times to repeat the full check if the result is False.
+        workers:          Thread pool size for TCP checks.
+        include_ipv6:     Whether to include IPv6 targets.
+        strict:           Require stronger evidence of connectivity.
+        ignore_proxies:   Disable env proxies for HTTP probes.
+
+    Returns:
+        True if the internet appears reachable and usable, else False.
+
+    Raises:
+        None.
+    """
+    attempts: int = max(1, retries + 1)
+    for attempt in range(1, attempts + 1):
+        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(f"Connectivity attempt {attempt}/{attempts}")
+        res = _check_once(
+            timeout=timeout_per_step,
+            workers=workers,
+            include_ipv6=include_ipv6,
+            ignore_proxies=ignore_proxies,
+        )
+
+        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            "Result(tcp_ok=%s, dns_ok=%s, http_ok=%s, captive=%s)",
+            res.tcp_ok, res.dns_ok, res.http_ok, res.captive_detected
+        )
+
+        if res.captive_detected:
+            return False
+
+        # HTTP probe success is the strongest positive signal (works with proxies too).
+        if res.http_ok:
+            return True
+
+        # TCP + DNS (e.g., raw connectivity plus name resolution).
+        if res.tcp_ok and res.dns_ok:
+            return True
+
+        # Only allow raw TCP success when NOT strict:
+        if not strict and res.tcp_ok:
+            return True
+
+        # Otherwise, not enough evidence; possibly retry due to transient hiccups.
+        if attempt < attempts:
+            import time
+            import random
+            delay: float = 0.10 + 0.05 * attempt + random.uniform(0.0, 0.05)
+            time.sleep(delay)
+    return False
 
 
 def detect_shell(options: Options) -> None:
@@ -3717,6 +4620,8 @@ def check_python_formatting(path: str | os.PathLike[str], diff_choice: int = 1) 
     RDQUOTE             = "\u201D"  # U+201D "RIGHT DOUBLE QUOTATION MARK"
     HORIZONTAL_ELLIPSIS = "\u2026"  # U+2026 "HORIZONTAL ELLIPSIS" (three closely spaced periods)
 
+    logging.warning("LOOK FOR logging.debug STATEMENTS THAT USE F-STRINGS OR THAT DON'T HAVE GUARDS!!")
+    
     if BACKTICK in src:
         logging.warning("File %s contains the backtick character (%r). Use straight quotation marks (') instead.", path, BACKTICK)
         if not ask_and_replace(old_str=BACKTICK, new_str="'", path=path, label='backtick',
@@ -4977,7 +5882,7 @@ def search_file(path: str | os.PathLike[str],
     """Return matching blocks for a single file."""
     p = Path(path)
     try:
-        text = p.read_text(encoding="utf-8")
+        text = p.read_text(encoding=ud.DEFAULT_ENCODING)
     except UnicodeDecodeError:
         text = p.read_text(encoding="latin-1")
     except Exception as ex:
@@ -5081,7 +5986,7 @@ def verify_script(options: Options, thepath: str | os.PathLike[str], thescript: 
             return
         thepath.write_text(thescript, encoding=DEFAULT_ENCODING)
         if not options.rawlog:
-            logging.info("Creating %s with the audit script.", thepath)
+            logging.info("Creating %s with the specified script.", thepath)
         return
 
     # It is a file: read and compare
@@ -5089,9 +5994,9 @@ def verify_script(options: Options, thepath: str | os.PathLike[str], thescript: 
     # Overwrite if different
     if existing != thescript:
         if not options.rawlog:
-            logging.info("Contents of %s differ from the audit script in %s as follows:", thepath, __file__)
+            logging.info("Contents of %s differ from the specified script in %s as follows:", thepath, __file__)
             my_diff(existing, thescript, thepath, diff_choice=1)
-            logging.info("Overwriting %s with the audit script.", thepath)
+            logging.info("Overwriting %s with the specified script.", thepath)
         thepath.write_text(thescript, encoding=DEFAULT_ENCODING)
 
 
