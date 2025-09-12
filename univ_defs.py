@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 
-# Written by Emmy Killett (she/her), ChatGPT 4o (it/its), ChatGPT o1-preview (it/its), ChatGPT o3-mini-high (it/its), ChatGPT o4-mini-high (it/its), ChatGPT 5 (it/its), and GitHub Copilot (it/its).
+# Written by Emmy Killett (she/her), ChatGPT 4o (it/its), ChatGPT o1-preview (it/its), ChatGPT o3-mini-high (it/its), ChatGPT o4-mini-high (it/its), ChatGPT 5 Thinking (it/its), and GitHub Copilot (it/its).
 from __future__ import annotations  # For Python 3.7+ compatibility with type annotations
 import os
 import sys
 from pathlib import Path  # Preferred over os.path for path manipulations.
 import logging
-from types import ModuleType
 from collections.abc import Iterator, Sequence
 from typing import TextIO, Any, TypeAlias, Type, Literal, Protocol
 import re  # Used to precompile regexes for performance
@@ -63,17 +62,6 @@ HORIZONTAL_ELLIPSIS = "\u2026"  # U+2026 "HORIZONTAL ELLIPSIS" (three closely sp
 EM_DASH             = "\u2014"  # U+2014 "EM DASH"
 
 
-def parent_unused_function() -> None:
-    """This function is not used in the test.py script."""
-    unused_function()
-
-
-def unused_function() -> None:
-    """This function is not used in the test.py script."""
-    print("This function is not used in the test.py script.")
-    import numpy as np
-
-
 class Options:
     """Class that has all global options in one place."""
 
@@ -126,116 +114,6 @@ class PlotOptions(Options):
             self.text_color       = "#000000"
             self.colors      = list(self._base_colors)
             self.lightcolors = list(self._base_lightcolors)
-
-
-class UnivClass:
-    """Class that handles the import and operation of large language model APIs."""
-
-    def __init__(self) -> None:
-        """Initialize the class and import the necessary modules."""
-        self.import_test()
-
-    def import_test(self) -> None:
-        """ Test the import of this module by printing a message and the version of Python being used."""
-        import openai
-
-
-def return_method_name(levels_up: int = 1) -> str:
-    """
-    Return the caller's qualified method/function name.
-
-    - For instance methods: ClassName.method
-    - For classmethods:     ClassName.method
-    - For staticmethods:    ClassName.method on Python >= 3.11 (via co_qualname),
-                            otherwise just 'method' (class is not recoverable without heuristics)
-    - For functions:        function
-
-    Args:
-        levels_up: How many frames up to inspect (1 = caller). If greater than
-                   the stack depth, the highest available frame is used.
-
-    Returns:
-        The current method name as a string, formatted as 'ClassName.method' or 'function'.
-
-    Raises:
-        None: This function does not raise exceptions, but it may log warnings
-              if sys._getframe or inspect fails.
-    """
-    fallback_logging_config()
-    try:
-        levels = int(levels_up)
-    except Exception:
-        levels = 1
-    if levels < 1:
-        levels = 1
-    name = "<unknown>"
-    fr   = None
-    # Try sys._getframe first
-    try:
-        fr = sys._getframe(levels)  # Get the frame at the specified level
-    except Exception as e1:
-        logging.warning("return_method_name(): sys._getframe(%s) failed. Falling back to inspect...", levels, exc_info=e1)
-        try:
-            import inspect
-            frame = inspect.currentframe()
-            try:
-                fr = frame
-                climbed = 0
-                for _ in range(levels):
-                    if fr is None or fr.f_back is None:
-                        break
-                    fr = fr.f_back
-                    climbed += 1
-                if climbed < levels:
-                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("return_method_name(): truncated at top of stack (requested levels_up=%s but only climbed=%s)", levels, climbed)
-            finally:
-                if frame is not None:
-                    try:
-                        frame.clear()
-                    except Exception:
-                        pass
-                    del frame
-        except Exception as e2:
-            logging.warning("return_method_name(): inspect fallback failed", exc_info=e2)
-            fr = None
-    if fr is not None:
-        # Python 3.11+: co_qualname gives 'Class.method' (or 'outer.<locals>.inner')
-        qual = getattr(fr.f_code, "co_qualname", None)
-        if isinstance(qual, str) and qual:
-            # Remove all occurrences of '.<locals>.' from the qualified name.
-            name = qual.replace(".<locals>.", ".")
-        else:
-            func     = fr.f_code.co_name
-            self_obj = fr.f_locals.get("self")
-            cls_obj  = fr.f_locals.get("cls")
-            if self_obj is not None:
-                name = f"{type(self_obj).__qualname__}.{func}"
-            elif isinstance(cls_obj, type):
-                name = f"{cls_obj.__qualname__}.{func}"
-            else:
-                argc = getattr(fr.f_code, "co_posonlyargcount", 0) + fr.f_code.co_argcount
-                if argc:
-                    for a in fr.f_code.co_varnames[:argc]:
-                        obj = fr.f_locals.get(a)
-                        if obj is not None:
-                            t = obj if isinstance(obj, type) else type(obj)
-                            attr = getattr(t, func, None)
-                            if attr is not None:
-                                name = f"{getattr(t, '__qualname__', t.__name__)}.{func}"
-                                break
-                    else:
-                        name = func
-                else:
-                    name = func
-    else:
-        logging.warning("return_method_name(): no frame available.")
-    if fr is not None:
-        if name == "<module>":
-            mod = fr.f_globals.get("__name__")
-            if isinstance(mod, str) and mod:
-                name = mod
-    fr = None  # Clear the frame reference to free memory.
-    return name
 
 
 class SelectionStrategy(str, Enum):
@@ -682,16 +560,7 @@ class LLMs:
         Initialize legacy vendors immediately (keeps backward compat).
         LiteLLM is lazy-initialized when/if config.use_litellm is True.
         """
-        # Legacy direct API access:
-        self.llms: list[dict[str, str]] = [
-            {"name": "OpenAI",    "module": "openai",    "env_var": "OPENAI_API_KEY"},
-            {"name": "Anthropic", "module": "anthropic", "env_var": "ANTHROPIC_API_KEY"},
-        ]
-        self.found_llms:                         dict[str, bool] = {}
-        self.llm_modules:                  dict[str, ModuleType] = {}
-        self.clients:                             dict[str, Any] = {}
-
-        # New LiteLLM configuration:
+        # LiteLLM configuration:
         self._config:                           LLMConfig | None = None
         self._selected:                         ModelInfo | None = None
         self._candidates_after_filter:           list[ModelInfo] = []
@@ -701,11 +570,18 @@ class LLMs:
         self._litellm_ready:                                bool = False
         self._litellm_mod:                            Any | None = None
         self._legacy_available:                             bool = False
-
         self._register_builtin_strategies()
         self.init_llms()  # sets up legacy clients
 
-        # Keep public fields for back-compat with existing call sites.
+        # Legacy direct API access:
+        from types import ModuleType
+        self.llms: list[dict[str, str]] = [
+            {"name": "OpenAI",    "module": "openai",    "env_var": "OPENAI_API_KEY"},
+            {"name": "Anthropic", "module": "anthropic", "env_var": "ANTHROPIC_API_KEY"},
+        ]
+        self.found_llms:                         dict[str, bool] = {}
+        self.llm_modules:                  dict[str, ModuleType] = {}
+        self.clients:                             dict[str, Any] = {}
         self.model:   str = "gpt-3.5-turbo"
         self.company: str = "OpenAI"
 
@@ -1645,7 +1521,7 @@ def configure_logging(basename: str, log_level: int | str = logging.INFO,
     if not logdir:  # Default to the current working directory if no logdir is provided.
         logdir = Path.cwd() / "logs"
     else:
-        logdir = Path(logdir).expanduser().resolve()
+        logdir = ensure_path(logdir)
     logdir.mkdir(parents=True, exist_ok=True)
 
     now = dt.datetime.now()
@@ -1833,7 +1709,7 @@ def my_fopen(file_path: str | os.PathLike[str], suppress_errors: bool = False,
     """
     fallback_logging_config(log_level=logging.INFO if not suppress_errors else logging.CRITICAL,
                             rawlog=rawlog)
-    file_path = Path(file_path).expanduser().resolve()
+    file_path = ensure_path(file_path)
     if not file_path.exists():
         this_message = f"File does not exist: {file_path}"
         if not rawlog:
@@ -1854,27 +1730,27 @@ def my_fopen(file_path: str | os.PathLike[str], suppress_errors: bool = False,
         return False
     # Does the file end with any of these (non-text) extensions?
     # Join all suffixes because some listed extensions look like ".tar.gz"
-    if "".join(file_path.suffixes).casefold() in VIDEO_EXTENSIONS:
+    if "".join(file_path.suffixes).casefold() in VIDEO_EXTENSIONS_SET:
         if not rawlog:
             if not suppress_errors: logging.error("Skipping video file %s", file_path)
             else:                   logging.info( "Skipping video file %s", file_path)
         return False
-    if "".join(file_path.suffixes).casefold() in AUDIO_EXTENSIONS:
+    if "".join(file_path.suffixes).casefold() in AUDIO_EXTENSIONS_SET:
         if not rawlog:
             if not suppress_errors: logging.error("Skipping audio file %s", file_path)
             else:                   logging.info( "Skipping audio file %s", file_path)
         return False
-    if "".join(file_path.suffixes).casefold() in IMAGE_EXTENSIONS:
+    if "".join(file_path.suffixes).casefold() in IMAGE_EXTENSIONS_SET:
         if not rawlog:
             if not suppress_errors: logging.error("Skipping image file %s", file_path)
             else:                   logging.info( "Skipping image file %s", file_path)
         return False
-    if "".join(file_path.suffixes).casefold() in ARCHIVE_EXTENSIONS:
+    if "".join(file_path.suffixes).casefold() in ARCHIVE_EXTENSIONS_SET:
         if not rawlog:
             if not suppress_errors: logging.error("Skipping archive file %s", file_path)
             else:                   logging.info( "Skipping archive file %s", file_path)
         return False
-    for encoding in TEXT_ENCODINGS:
+    for encoding in TEXT_ENCODINGS:  # use the (ordered) list so more commonly used encodings are tried first.
         try:
             with open(file_path, "r", encoding=encoding) as file:
                 if numlines is None:
@@ -2008,7 +1884,7 @@ def _builtin_stub(obj: object) -> str:
 
 
 def show_function_source(target: object | str, *, unwrap: bool = True,
-                         file: TextIO | None = None) -> str:
+                         output: str | os.PathLike[str] | TextIO | None = None) -> str:
     """
     Print the full source text of a Python function (including comments,
     docstrings, decorators, and type hints).
@@ -2019,7 +1895,22 @@ def show_function_source(target: object | str, *, unwrap: bool = True,
                 in builtins, then as a dotted path via pydoc.locate (e.g. 'pkg.mod.func').
         unwrap: If True, attempt to unwrap decorated functions to show
                 the original implementation. Defaults to True.
-        file:   A file-like object to write to (defaults to sys.stdout).
+        output: A file-like object to write to (optional, defaults to sys.stdout). More details:
+    
+    Details on the "output" argument:
+    - None -> sys.stdout
+    - TextIO (e.g., sys.stdout, an open text file, StringIO) -> used as-is
+             (must be opened in *text* mode; binary streams are rejected)
+    - str | os.PathLike[str] -> treated as a path:
+             * '~' is expanded
+             * parent directories are created (parents=True, exist_ok=True)
+             * file is opened in append mode ('a', UTF-8)
+             * a one-line note is written indicating whether we created or appended
+    Notes:
+    - A trailing newline is added if the source text doesn't already end with one.
+    - If you pass the string "-" as the output path, it is treated as stdout.
+    - If the given path is an existing directory, an IsADirectoryError is raised.
+    - If you pass a binary stream, a TypeError is raised.
 
     Returns:
         str: The source text that was printed.
@@ -2033,6 +1924,8 @@ def show_function_source(target: object | str, *, unwrap: bool = True,
     import functools
     import inspect
     import pydoc
+    import io
+    from collections.abc import Callable
     # Resolve the object if 'target' is a string
     if isinstance(target, str):
         name = target
@@ -2090,9 +1983,59 @@ def show_function_source(target: object | str, *, unwrap: bool = True,
     else:
         src = inspect.getsource(obj)
 
-    out = file or sys.stdout
-    # Preserve the exact text (including trailing newline if missing)
-    print(src, file=out, end="" if src.endswith("\n") else "\n")
+    # Decide where to write
+    out: TextIO
+    closer: Callable[[], None] | None = None  # callable to close if *we* open a file
+    note: str | None = None
+    if output is None:
+        out = sys.stdout
+    # Accept known text-mode IO bases directly
+    elif isinstance(output, (io.TextIOBase, io.StringIO)):
+        out = output
+    # Accept "-" as a common alias for stdout
+    elif isinstance(output, (str, os.PathLike)) and str(output) == "-":
+        out = sys.stdout
+    # Path-like or string path
+    elif isinstance(output, (str, os.PathLike)):
+        path = ensure_path(output, resolve=False)
+        # Fail fast if it's a directory
+        if path.exists() and path.is_dir():
+            raise IsADirectoryError(f"Output path is a directory: {path!s}")
+        # Ensure parents exist ('.' is fine to call mkdir() on with exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existed = path.exists()
+        note = (f"# Appending to existing file: {path.resolve()}"
+                if existed
+                else f"# Creating new file: {path.resolve()}")
+        # Try atomic write helper if available; fall back on any failure.
+        _maw = globals().get("my_atomic_write")
+        if callable(_maw):
+            try:
+                # newline hygiene: one newline after note; ensure src ends with exactly one
+                payload = (note + "\n") + (src if src.endswith("\n") else src + "\n")
+                _maw(path, payload, "a", encoding="utf-8")
+                return src
+            except Exception:
+                # Non-atomic fallback below
+                pass
+        # newline="" lets print() manage newlines consistently across platforms
+        out = path.open("a", encoding="utf-8", newline="")
+        closer = out.close
+    # Last chance: duck-typed "file-like" with a text write() method.
+    # Reject binary streams explicitly.
+    elif hasattr(output, "write"):
+        if isinstance(output, (io.BufferedIOBase, io.RawIOBase)):
+            raise TypeError("Binary streams are not supported; provide a text-mode stream.")
+        out = output  # type: ignore[assignment]
+    else:
+        raise TypeError("output must be None, a path (str/os.PathLike), or a text-mode TextIO.")
+    try:
+        if note:
+            print(note, file=out)
+        print(src, file=out, end="" if src.endswith("\n") else "\n")
+    finally:
+        if closer is not None:
+            closer()
     return src
 
 
@@ -2115,6 +2058,104 @@ def normalize_to_dict(value: Any, var_name: str, script_path: str | os.PathLike[
     else:
         logging.warning("Variable %r in %s is of type %s, expected dict or JSON string.", var_name, script_path, type(value).__name__)
     return {}
+
+
+def return_method_name(levels_up: int = 1) -> str:
+    """
+    Return the caller's qualified method/function name.
+
+    - For instance methods: ClassName.method
+    - For classmethods:     ClassName.method
+    - For staticmethods:    ClassName.method on Python >= 3.11 (via co_qualname),
+                            otherwise just 'method' (class is not recoverable without heuristics)
+    - For functions:        function
+
+    Args:
+        levels_up: How many frames up to inspect (1 = caller). If greater than
+                   the stack depth, the highest available frame is used.
+
+    Returns:
+        The current method name as a string, formatted as 'ClassName.method' or 'function'.
+
+    Raises:
+        None: This function does not raise exceptions, but it may log warnings
+              if sys._getframe or inspect fails.
+    """
+    fallback_logging_config()
+    try:
+        levels = int(levels_up)
+    except Exception:
+        levels = 1
+    if levels < 1:
+        levels = 1
+    name = "<unknown>"
+    fr   = None
+    # Try sys._getframe first
+    try:
+        fr = sys._getframe(levels)  # Get the frame at the specified level
+    except Exception as e1:
+        logging.warning("return_method_name(): sys._getframe(%s) failed. Falling back to inspect...", levels, exc_info=e1)
+        try:
+            import inspect
+            frame = inspect.currentframe()
+            try:
+                fr = frame
+                climbed = 0
+                for _ in range(levels):
+                    if fr is None or fr.f_back is None:
+                        break
+                    fr = fr.f_back
+                    climbed += 1
+                if climbed < levels:
+                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("return_method_name(): truncated at top of stack (requested levels_up=%s but only climbed=%s)", levels, climbed)
+            finally:
+                if frame is not None:
+                    try:
+                        frame.clear()
+                    except Exception:
+                        pass
+                    del frame
+        except Exception as e2:
+            logging.warning("return_method_name(): inspect fallback failed", exc_info=e2)
+            fr = None
+    if fr is not None:
+        # Python 3.11+: co_qualname gives 'Class.method' (or 'outer.<locals>.inner')
+        qual = getattr(fr.f_code, "co_qualname", None)
+        if isinstance(qual, str) and qual:
+            # Remove all occurrences of '.<locals>.' from the qualified name.
+            name = qual.replace(".<locals>.", ".")
+        else:
+            func     = fr.f_code.co_name
+            self_obj = fr.f_locals.get("self")
+            cls_obj  = fr.f_locals.get("cls")
+            if self_obj is not None:
+                name = f"{type(self_obj).__qualname__}.{func}"
+            elif isinstance(cls_obj, type):
+                name = f"{cls_obj.__qualname__}.{func}"
+            else:
+                argc = getattr(fr.f_code, "co_posonlyargcount", 0) + fr.f_code.co_argcount
+                if argc:
+                    for a in fr.f_code.co_varnames[:argc]:
+                        obj = fr.f_locals.get(a)
+                        if obj is not None:
+                            t = obj if isinstance(obj, type) else type(obj)
+                            attr = getattr(t, func, None)
+                            if attr is not None:
+                                name = f"{getattr(t, '__qualname__', t.__name__)}.{func}"
+                                break
+                    else:
+                        name = func
+                else:
+                    name = func
+    else:
+        logging.warning("return_method_name(): no frame available.")
+    if fr is not None:
+        if name == "<module>":
+            mod = fr.f_globals.get("__name__")
+            if isinstance(mod, str) and mod:
+                name = mod
+    fr = None  # Clear the frame reference to free memory.
+    return name
 
 
 def get_hostname_socket(rawlog: bool = False) -> str | None:
@@ -2628,7 +2669,7 @@ class CheckResult:
     captive_detected: bool
 
 
-def _check_once(timeout: float, workers: int,
+def _check_once(timeout:     float, workers: int,
                 include_ipv6: bool, ignore_proxies: bool) -> CheckResult:
     """
     Perform one pass of the connectivity checks.
@@ -2733,12 +2774,10 @@ def is_internet_available(timeout_per_step: float = 2.5,
     attempts: int = max(1, retries + 1)
     for attempt in range(1, attempts + 1):
         logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(f"Connectivity attempt {attempt}/{attempts}")
-        res = _check_once(
-            timeout=timeout_per_step,
-            workers=workers,
-            include_ipv6=include_ipv6,
-            ignore_proxies=ignore_proxies,
-        )
+        res = _check_once(timeout=timeout_per_step,
+                          workers=workers,
+                          include_ipv6=include_ipv6,
+                          ignore_proxies=ignore_proxies)
 
         logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
             "Result(tcp_ok=%s, dns_ok=%s, http_ok=%s, captive=%s)",
@@ -2763,7 +2802,7 @@ def is_internet_available(timeout_per_step: float = 2.5,
         # Otherwise, not enough evidence; possibly retry due to transient hiccups.
         if attempt < attempts:
             import time
-            import random
+            import random  # Jitter retries slightly.
             delay: float = 0.10 + 0.05 * attempt + random.uniform(0.0, 0.05)
             time.sleep(delay)
     return False
@@ -2795,7 +2834,7 @@ def detect_shell(options: Options) -> None:
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
             logging.error(f"Error detecting shell via ps: {e}")
     if shell_path:
-        options.shell = Path(shell_path).resolve().name.lstrip("-")
+        options.shell = ensure_path(shell_path).name.lstrip("-")
     else:
         logging.error("Could not detect shell from SHELL environment variable or parent process.")
         options.shell = None
@@ -2870,8 +2909,39 @@ def find_additional_alias_files(options: Options) -> None:
     options.additional_alias_files = valid_files
 
 
-_PY312_PLUS = sys.version_info >= (3, 12)
-_PY313_PLUS = sys.version_info >= (3, 13)
+def ensure_path(path: str | os.PathLike[str],
+                resolve: bool = True,
+                expand:  bool = True,
+                strict:  bool = False) -> Path:
+    """
+    Ensure that the path is a Path. If not, make it a Path.
+    
+    Args:
+        path:    The path to ensure is a Path object.
+        resolve: If True, resolve the path to its absolute form (following symlinks).
+        expand:  If True, expand user directories (e.g., ~) in the path.
+        strict:  If True, raise an error if the path does not exist. If False, return a Path object that may not exist.
+                 If resolve = False but strict = True, only check existence without following symlinks.
+
+    Returns:
+        A Path object representing the ensured path.
+
+    Raises:
+        FileNotFoundError:               If the path does not exist.
+        RuntimeError or OSError (ELOOP): If resolve(strict=True) and the symlink loops
+    """
+    p = path if isinstance(path, Path) else Path(path)
+    if not expand and not resolve and not strict:
+        return p
+    p = p.expanduser() if  expand else p
+    if strict and not resolve:
+        fallback_logging_config()
+        logging.getLogger().isEnabledFor(logging.WARNING) and logging.warning(
+            "%s: since resolve=False, strict=True only checks existence. "
+            "It doesn't follow symlinks.", return_method_name())
+        if not os.path.lexists(os.fspath(p)):  # Doesn't follow symlinks
+            raise FileNotFoundError(p)
+    return p.resolve(strict=strict) if resolve else p
 
 
 def _exists(p: Path, *, follow_symlinks: bool) -> bool:
@@ -2892,7 +2962,7 @@ def _is_file(p: Path, *, follow_symlinks: bool) -> bool:
     """
     Version-proof 'is regular file?' that can avoid following symlinks.
     """
-    if _PY313_PLUS:                          # 3.13+ only
+    if sys.version_info >= (3, 13):  # 3.13+ supports follow_symlinks
         return p.is_file(follow_symlinks=follow_symlinks)
     if follow_symlinks:
         return p.is_file()
@@ -2907,7 +2977,7 @@ def _is_dir(p: Path, *, follow_symlinks: bool) -> bool:
     """
     Version-proof 'is directory?' that can avoid following symlinks.
     """
-    if _PY313_PLUS:              # 3.13+ supports follow_symlinks for is_dir
+    if sys.version_info >= (3, 13):  # 3.13+ supports follow_symlinks
         return p.is_dir(follow_symlinks=follow_symlinks)
     if follow_symlinks:
         return p.is_dir()
@@ -2943,7 +3013,7 @@ def ensure_file(path: str | os.PathLike[str],
         ValueError:        If the path exists but is not a regular file, or if symlinks are not allowed.
         ValueError:        If raise_on_empty is True and the file is empty.
     """
-    p = Path(path).expanduser()
+    p = ensure_path(path, resolve=False)
     if not _exists(p, follow_symlinks=follow_symlinks):
         raise FileNotFoundError(f"No such file: {p}")
     if not _is_file(p, follow_symlinks=follow_symlinks):
@@ -2985,7 +3055,7 @@ def ensure_dir(path: str | os.PathLike[str],
         FileNotFoundError:  If the directory does not exist.
         NotADirectoryError: If the path exists but is not a directory.
     """
-    p = Path(path).expanduser()
+    p = ensure_path(path, resolve=False)
     if not _exists(p, follow_symlinks=follow_symlinks):
         raise FileNotFoundError(f"No such directory: {p}")
     if not _is_dir(p, follow_symlinks=follow_symlinks):
@@ -3025,7 +3095,7 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
     import socket
 
     fallback_logging_config()
-    dest = Path(dest).resolve()
+    dest = ensure_path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     temp = dest.with_suffix(dest.suffix + ".part")
 
@@ -3162,7 +3232,7 @@ def query_free_space(path: str | os.PathLike[str]) -> int:
         FileNotFoundError: If no existing parent directory is found.
         OSError:           If the filesystem information cannot be retrieved.
     """
-    p = Path(path)
+    p = ensure_path(path)
 
     # Use the path itself if it's an existing directory; otherwise use its parent.
     base = p if (p.exists() and p.is_dir()) else p.parent
@@ -3224,7 +3294,7 @@ def find_ffmpeg() -> str | None:
     for env_key in ("FFMPEG", "FFMPEG_PATH", "IMAGEIO_FFMPEG_EXE"):
         p = os.environ.get(env_key)
         if p and Path(p).exists():
-            return str(Path(p))
+            return os.fspath(Path(p))
 
     # 2) On PATH (handles .exe on Windows automatically)
     for name in ("ffmpeg", "ffmpeg.exe"):
@@ -3235,9 +3305,9 @@ def find_ffmpeg() -> str | None:
     # 3) Typical Conda/Miniconda/Mambaforge locations
     sp = Path(sys.prefix)  # current Python env prefix
     candidates = [
-        sp / "bin" / "ffmpeg",                 # Unix-like
+        sp / "bin"     / "ffmpeg",              # Unix-like
         sp / "Library" / "bin" / "ffmpeg.exe",  # Windows (Conda)
-        sp / "Scripts" / "ffmpeg.exe",         # Windows (alt)
+        sp / "Scripts" / "ffmpeg.exe",          # Windows (alt)
     ]
 
     # 4) Common Windows installs (adjust or extend as you like)
@@ -3254,7 +3324,7 @@ def find_ffmpeg() -> str | None:
         import imageio_ffmpeg  # type: ignore
         p = imageio_ffmpeg.get_ffmpeg_exe()
         if p and Path(p).exists():
-            return str(Path(p))
+            return os.fspath(Path(p))
     except Exception:
         pass
 
@@ -4537,7 +4607,7 @@ def filename_format(text: str, sep: str = "_", max_length: int = None) -> str:
     Turn arbitrary text into an ASCII-only, filesystem‐safe base filename.
     WARNING: Do not include an extension in the text, because this function
     might remove the dot which separates the filename from the extension.
-    It attempts to recognize and remove extensions listed in ALL_KNOWN_EXTENSIONS
+    It attempts to recognize and remove extensions listed in ALL_KNOWN_EXTENSIONS_SET
     but this list is not exhaustive.
 
     Steps:
@@ -4575,7 +4645,7 @@ def filename_format(text: str, sep: str = "_", max_length: int = None) -> str:
 
     # List of common extensions to recognize and (temporarily) remove
     removed_ext = ""
-    for ext in ALL_KNOWN_EXTENSIONS:
+    for ext in ALL_KNOWN_EXTENSIONS_SET:
         if text.casefold().endswith(ext):
             text = text[:-len(ext)]
             removed_ext = ext
@@ -4636,19 +4706,18 @@ def if_filepath_then_read(input_string_or_filepath: str | os.PathLike[str],
     # Heuristics: if it contains newlines or is ridiculously long, it's source.
     if isinstance(input_string_or_filepath, str) and ("\n" in input_string_or_filepath or len(input_string_or_filepath) > 4096):
         return input_string_or_filepath
-    if not force_string and Path(input_string_or_filepath).is_file():
-        file_path = Path(input_string_or_filepath)
+    if not force_string and (file_path := ensure_path(input_string_or_filepath)).is_file():
         try:
             contents = my_fopen(file_path, suppress_errors=True)
             if not contents:
                 logging.error("Could not read file: %s", file_path)
                 return ""
             return contents
-        except FileNotFoundError as e:
+        except FileNotFoundError:
             logging.exception("File not found: %s", file_path)
-        except PermissionError as e:
+        except PermissionError:
             logging.exception("Permission denied: %s", file_path)
-        except UnicodeDecodeError as e:
+        except UnicodeDecodeError:
             logging.exception("Could not decode %r.", file_path)
     else:  # Otherwise, treat "input_string" as a string.
         if not isinstance(input_string_or_filepath, str):
@@ -4677,7 +4746,7 @@ def compile_code(source_or_filepath: str | os.PathLike[str],
     # Read from file if source is a file path
     source = if_filepath_then_read(source_or_filepath, force_string=force_source)
     if source != source_or_filepath:
-        file_path = Path(source_or_filepath).expanduser().resolve()
+        file_path = ensure_path(source_or_filepath)
     else:
         # If it's a string, we need to provide a dummy file path for the compiler.
         # This is just to satisfy the compiler, it won't be used.
@@ -4840,7 +4909,7 @@ def _make_format_checker() -> Type[Any]:
                 # "NumPy"              : self._check_numpy_docstring,
                 # "reStructuredText" : self._check_rst_docstring,
             }.get(self.doc_style)
-            logging.warning("Consider adding an exception to the docstring checker: if the function is less than 5(?) lines, allow a single line docstring without the required sections.")
+            logging.warning("Consider adding an exception to the docstring checker: if the function is less than 5(?) lines, allow a single line docstring without the required sections. Also, if there are no args or no return value or it doesn't raise exceptions.")
             if checker is not None:
                 checker(node, who)
 
@@ -5263,7 +5332,7 @@ def my_diff(orig_text: str, changed_text: str,
     """
     import difflib
     fallback_logging_config(rawlog=True)
-    orig_path = Path(orig_path).expanduser().resolve()
+    orig_path = ensure_path(orig_path)
     if not changed_path:
         changed_path = orig_path
     logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("At the top of the function %s(), diff_choice=%s", return_method_name(), diff_choice)
@@ -5399,12 +5468,12 @@ def is_python_script(path: str | os.PathLike[str]) -> bool:
         PermissionError:   If the file is not accessible due to permission issues.
     """
     import stat
-    path = Path(path)
+    path = ensure_path(path)
     if not path.is_file():
         return False
 
     # Common extensions
-    if path.suffix.casefold() in PYTHON_EXTENSIONS:
+    if path.suffix.casefold() in PYTHON_EXTENSIONS_SET:
         return True
 
     # No-extension scripts: check for executable bit + python shebang
@@ -5611,7 +5680,7 @@ def _validate_glob_pattern(pattern: str) -> None:
 def _resolve_dir(dir_arg: str | None) -> Path:
     """Resolve the directory from the command line argument."""
     if dir_arg:
-        p = Path(dir_arg).expanduser().resolve()
+        p = ensure_path(dir_arg)
     else:
         p = Path.cwd()
     if not p.exists():
@@ -6306,7 +6375,7 @@ def verify_script(options: Options, thepath: str | os.PathLike[str], thescript: 
     - Otherwise, nothing happens.
     """
     # Check if it exists and is a file
-    thepath = Path(thepath).expanduser().resolve()
+    thepath = ensure_path(thepath)
     if not thepath.is_file():
         if thepath.is_dir():
             if not options.rawlog:
@@ -6467,7 +6536,7 @@ def my_atomic_write(filepath: str | Path | os.PathLike[str], data: str | bytes |
     """
     from atomicwrites import atomic_write
     from filelock import FileLock, Timeout
-    path = Path(filepath)
+    path = ensure_path(filepath)
     # ensure parent directory exists
     path.parent.mkdir(parents=True, exist_ok=True)
     # choose text or binary mode
@@ -6495,7 +6564,7 @@ def fix_mojibake(filepath: str | os.PathLike[str], make_backup: bool = True,
     """
     import datetime as dt
     fallback_logging_config()
-    filepath = Path(filepath)
+    filepath = ensure_file(filepath)
     if not filepath.is_file():
         logging.error(f"{filepath} is not a file")
         return
@@ -6579,7 +6648,7 @@ def treeview_new_files(directory:      str | os.PathLike[str],
     import datetime as dt
     fallback_logging_config(rawlog=True)
 
-    directory = Path(directory).resolve()
+    directory = ensure_path(directory)
     if not directory.exists():
         logging.error(f"{prefix}└── [Directory does not exist: {directory}]")
         return False
@@ -6591,7 +6660,7 @@ def treeview_new_files(directory:      str | os.PathLike[str],
         last_mtime = 0
         logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("%sNo last file path provided, considering all files.", prefix)
     else:
-        last_file_path = Path(last_file_path).expanduser().resolve()
+        last_file_path = ensure_path(last_file_path)
         if not last_file_path.exists():
             logging.error("%s└── [Last file path does not exist: %s]", prefix, last_file_path)
             return False
@@ -6613,7 +6682,7 @@ def treeview_new_files(directory:      str | os.PathLike[str],
     if state is None:
         state = {"excluded_dirs"   : {"__pycache__"},
                  "already_printed" : set(),
-                 "my_filepath"     : Path(__file__).expanduser().resolve()}
+                 "my_filepath"     : ensure_path(__file__)}
     already_printed = state['already_printed']
     excluded_dirs   = state['excluded_dirs']
     my_filepath     = state['my_filepath']
@@ -6894,7 +6963,7 @@ def open_filemanager_with_dirs(directories: list[str | os.PathLike[str]]) -> Non
         return
     logging.info("Opening file manager with specified directories...")
     for directory in directories:
-        directory = Path(directory)
+        directory = ensure_path(directory)
         if not directory.is_absolute():
             logging.error(f"Directory {directory} is not an absolute path. Skipping.")
             continue
@@ -7118,19 +7187,17 @@ def open_dir_in_VLC(the_dir: str | os.PathLike[str], sort_choice: str = "sort_by
     the_dir = ensure_dir(the_dir)
     if the_dir is None:
         raise ValueError("The directory path cannot be None.")
-    the_dir = Path(the_dir).expanduser().resolve(strict=True)
-    if not the_dir.is_dir():
-        raise ValueError(f"The specified path '{the_dir}' is not a valid directory.")
+    the_dir = ensure_dir(the_dir)
     # start_flag = "--start-paused" if no_start else False # The "--start-paused" flag forces you to press play in VLC EACH TIME YOU GO TO A NEW PLAYLIST ENTRY!
     start_flag = "--no-playlist-autostart" if no_start else False
     # List to store files with their modification times
     files_with_times: list[tuple[float, Path]] = []
     dirs_with_times:  list[tuple[float, Path]] = []  # Only used if not recursive
-    entries: Iterator[Path] = the_dir.rglob("*") if recursive else the_dir.iterdir()
+    entries:                    Iterator[Path] = the_dir.rglob("*") if recursive else the_dir.iterdir()
     for p in entries:
         if p.is_file():
-            # Exclude .m3u or .m3u8 playlist files
-            if p.suffix.casefold() in (".m3u", ".m3u8"):
+            # Exclude playlist files
+            if p.suffix.casefold() in PLAYLIST_EXTENSIONS_SET:
                 continue
             files_with_times.append((p.stat().st_mtime, p))
         elif not recursive and p.is_dir():
@@ -7180,7 +7247,7 @@ def remove_prefix_from_filename(filepath: str | os.PathLike[str], prefix: str) -
         OSError: If the rename operation fails due to an OS error (e.g., permission denied).
     """
     fallback_logging_config()
-    filepath = Path(filepath).expanduser().resolve()
+    filepath = ensure_path(filepath)
     if not filepath.exists():
         logging.warning("File or directory '%s' does not exist.", filepath)
         return False
@@ -7208,7 +7275,7 @@ def remove_prefix_from_filename(filepath: str | os.PathLike[str], prefix: str) -
 def remove_prefix_from_html_title(filepath: str | os.PathLike[str], prefix: str) -> bool:
     """If the given filepath is an HTML file and its title starts with the given prefix, remove the prefix from the title and save the file, then return True. Otherwise, return False."""
     fallback_logging_config()
-    filepath = Path(filepath)
+    filepath = ensure_path(filepath)
     if not filepath.is_file():
         logging.warning("File '%s' does not exist or is not a file.", filepath)
         return False
@@ -7275,7 +7342,7 @@ def combine_html_files(file_paths:  list[str | os.PathLike[str]],
     combined_html = f"<!DOCTYPE html>\n<html>\n{head_content}\n<body>\n{combined_body}\n</body>\n</html>"
     # Save to the output file path
     try:
-        output_file_path = Path(output_file_path).expanduser().resolve()
+        output_file_path = ensure_path(output_file_path)
         output_file_path.parent.mkdir(parents=True, exist_ok=True)
         output_file_path.write_text(combined_html, encoding=DEFAULT_ENCODING)
     except Exception:  # Catch any unexpected errors from writing the file without crashing.
@@ -7356,7 +7423,8 @@ TEXT_ENCODINGS: list[str] = [
     "shift_jis",       "shift_jis_2004", "shift_jisx0213",  "unicode-escape",     "uu",
     "zlib",
 ]
-# # Examine encodings for any uppercase characters.
+TEXT_ENCODINGS_SET: set[str] = set(TEXT_ENCODINGS)  # sets are faster
+# # Quality control: examine encodings for any uppercase characters.
 # for enc in TEXT_ENCODINGS:
 #     if any(c.isupper() for c in enc):
 #         raise ValueError(f"Encoding '{enc}' contains uppercase characters. All encodings should be lowercase.")
@@ -7404,7 +7472,8 @@ TEXT_ENCODINGS: list[str] = [
 # print(f"{len(missing_encodings)} encodings are missing from TEXT_ENCODINGS: {missing_encodings}")
 
 # A comprehensive list of python extensions.
-PYTHON_EXTENSIONS: list[str] = [".py", ".pyw"]
+PYTHON_EXTENSIONS:    list[str] = [".py", ".pyw"]
+PYTHON_EXTENSIONS_SET: set[str] = set(PYTHON_EXTENSIONS)  # sets are faster
 
 # A comprehensive list of text file extensions.
 TEXT_EXTENSIONS: list[str] = [
@@ -7433,6 +7502,7 @@ TEXT_EXTENSIONS: list[str] = [
     ".ssa",          ".lrc",      ".dot",      ".gv",         ".mermaid",    ".sgf",
     ".pgn",          ".sfv",      ".md5",      ".sha1",       ".sha256",
 ]
+TEXT_EXTENSIONS_SET: set[str] = set(TEXT_EXTENSIONS)  # sets are faster
 # check_list_for_duplicates(TEXT_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
 # A comprehensive list of video file extensions.
@@ -7456,6 +7526,7 @@ VIDEO_EXTENSIONS: list[str] = [
     ".nsv",   ".nut",   ".bk2",   ".usm",    ".xmv",   ".thp",
     ".pmf",   ".h263",  ".h261",  ".vp9",
 ]
+VIDEO_EXTENSIONS_SET: set[str] = set(VIDEO_EXTENSIONS)  # sets are faster
 # check_list_for_duplicates(VIDEO_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
 # A comprehensive list of audio file extensions.
@@ -7480,6 +7551,7 @@ AUDIO_EXTENSIONS: list[str] = [
     ".ds2",   ".awb",   ".bcstm", ".bfstm", ".bcwav", ".bfwav",
     ".fsb",   ".wem",   ".xwm",   ".lopus",
 ]
+AUDIO_EXTENSIONS_SET: set[str] = set(AUDIO_EXTENSIONS)  # sets are faster
 # check_list_for_duplicates(AUDIO_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
 # A comprehensive list of subtitle file extensions.
@@ -7493,6 +7565,7 @@ SUBTITLE_EXTENSIONS: list[str] = [
     ".sst",   ".son",    ".mcc",   ".pac",   ".890",   ".mpl",
     ".onl",   ".cin",    ".tds",   ".ult",   ".ttxt",
 ]
+SUBTITLE_EXTENSIONS_SET: set[str] = set(SUBTITLE_EXTENSIONS)  # sets are faster
 # check_list_for_duplicates(SUBTITLE_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
 # A comprehensive list of image file extensions.
@@ -7520,6 +7593,7 @@ IMAGE_EXTENSIONS: list[str] = [
     ".pdn",  ".psp",   ".ps",     ".ase",  ".clip", ".afphoto",
     ".bsq",
 ]
+IMAGE_EXTENSIONS_SET: set[str] = set(IMAGE_EXTENSIONS)  # sets are faster
 # check_list_for_duplicates(IMAGE_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
 # A comprehensive list of playlist file extensions.
@@ -7529,6 +7603,7 @@ PLAYLIST_EXTENSIONS: list[str] = [
     ".wax",    ".wmx",     ".wvx",  ".fpl",   ".mpcpl",  ".dpl",
     ".aimppl", ".aimppl4", ".pla",  ".xml",
 ]
+PLAYLIST_EXTENSIONS_SET: set[str] = set(PLAYLIST_EXTENSIONS)  # sets are faster
 # check_list_for_duplicates(PLAYLIST_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
 # A comprehensive list of archive file extensions.
@@ -7552,6 +7627,7 @@ ARCHIVE_EXTENSIONS: list[str] = [
 ARCHIVE_EXTENSIONS.extend([f".z{num:02d}" for num in range(2, 100)])
 ARCHIVE_EXTENSIONS.extend([f".r{num:02d}" for num in range(1, 100)])
 ARCHIVE_EXTENSIONS.extend([f".{num:03d}"  for num in range(2, 100)])
+ARCHIVE_EXTENSIONS_SET: set[str] = set(ARCHIVE_EXTENSIONS)  # sets are faster
 # check_list_for_duplicates(ARCHIVE_EXTENSIONS) # Run this after adding new extensions to ensure there are no duplicates.
 
 ALL_KNOWN_EXTENSIONS: list[str] = PYTHON_EXTENSIONS   + TEXT_EXTENSIONS  + \
@@ -7559,7 +7635,9 @@ ALL_KNOWN_EXTENSIONS: list[str] = PYTHON_EXTENSIONS   + TEXT_EXTENSIONS  + \
                                   AUDIO_EXTENSIONS    + IMAGE_EXTENSIONS + \
                                   PLAYLIST_EXTENSIONS + ARCHIVE_EXTENSIONS
 # print(f"{len(ALL_KNOWN_EXTENSIONS)} total known extensions.")
-ALL_KNOWN_EXTENSIONS = list(set(ALL_KNOWN_EXTENSIONS))  # Remove duplicates
+ALL_KNOWN_EXTENSIONS_SET: set[str] =  set(ALL_KNOWN_EXTENSIONS)      # sets are faster
+ALL_KNOWN_EXTENSIONS               = list(ALL_KNOWN_EXTENSIONS_SET)  # Remove duplicates
+# Quality control: search for uppercase characters and extensions like .tar.gz
 # print(f"{len(ALL_KNOWN_EXTENSIONS)} total known extensions.")
 # for ext in ALL_KNOWN_EXTENSIONS:
 #     if any(c.isupper() for c in ext):
