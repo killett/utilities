@@ -80,9 +80,9 @@ class PlotOptions(Options):
         """Initialize PlotOptions class with values from the Options class, and default plotting values."""
         # Ideas for improving this parent class: https://chatgpt.com/share/6876a7e2-da84-8006-9c8f-100d243b73e4
         super().__init__()
-        self.myfigsize   = (16, 9)
-        self.fsize       = 24
-        self.dpi_choice  = 300
+        self.myfigsize  = (16, 9)
+        self.fsize      = 24
+        self.dpi_choice = 300
         # keep immutable "base" palettes so we can recompute safely
         self._base_colors      = ["black", "red",    "blue",      "green",      "purple"]
         self._base_lightcolors = ["grey",  "pink",   "lightblue", "lightgreen", "lightpurple"]
@@ -1602,7 +1602,7 @@ def my_critical_error(message: str = "A critical error occurred.",
         # No exception is being handled; log only the message
         logging.critical(message)
     if choose_breakpoint:
-        print("Entering breakpoint while inside the my_critical_error() function. You can step outside of this function and remain paused by pressing 'n' to access variables in the calling function or press 'c' to continue running the script.")
+        print("Entering breakpoint while inside the my_critical_error() function. You can step outside of this function and remain paused by pressing 'n' to access variables in the calling function or press 'c' to continue running the script. If logging is enabled but the level is not set to DEBUG, you can type logging.getLogger().setLevel(logging.DEBUG) to see more detailed logs.")
         breakpoint()
     else:
         sys.exit(exit_code)
@@ -1713,7 +1713,7 @@ def my_fopen(file_path: str | os.PathLike[str], suppress_errors: bool = False,
     fallback_logging_config(log_level=logging.INFO if not suppress_errors else logging.CRITICAL,
                             rawlog=rawlog)
     file_path = ensure_path(file_path)
-    if not file_path.exists():
+    if not safe_exists(file_path):
         this_message = f"File does not exist: {os.fspath(file_path)}"
         if not rawlog:
             if not suppress_errors: logging.error(this_message)
@@ -2024,9 +2024,9 @@ def show_function_source(target: object | str, *, unwrap: bool = True,
             raise IsADirectoryError(f"Output path is a directory: {os.fspath(path)}")
         # Ensure parents exist ('.' is fine to call mkdir() on with exist_ok=True)
         path.parent.mkdir(parents=True, exist_ok=True)
-        existed = path.exists()
+        exists = safe_exists(path)
         note = (f"# Appending to existing file: {os.fspath(path)}"
-                if existed
+                if exists
                 else f"# Creating new file: {os.fspath(path)}")
         # Try atomic write helper if available; fall back on any failure.
         _maw = globals().get("my_atomic_write")
@@ -2972,9 +2972,8 @@ def ensure_file(path: str | os.PathLike[str],
         ValueError:        If the path exists but is not a regular file, or if symlinks are not allowed.
         ValueError:        If raise_on_empty is True and the file is empty (or bad permissions, etc.)
     """
-    p = ensure_path(path)  # expanded + absolute, no symlink resolution
-    # Existence check (follow or not)
-    exists = p.exists() if follow_symlinks else os.path.lexists(os.fspath(p))
+    p      = ensure_path(path)  # expanded + absolute, no symlink resolution
+    exists = safe_exists(p, follow_symlinks=follow_symlinks)
     if not exists:
         raise FileNotFoundError(f"No such file: {os.fspath(p)}")
     if not allow_symlink and p.is_symlink():
@@ -3017,8 +3016,8 @@ def ensure_dir(path: str | os.PathLike[str],
         FileNotFoundError:  If the directory does not exist.
         NotADirectoryError: If the path exists but is not a directory.
     """
-    p      = ensure_path(path)  # expanded + absolute
-    exists = p.exists() if follow_symlinks else os.path.lexists(os.fspath(p))
+    p      = ensure_path(path)  # expanded + absolute, no symlink resolution
+    exists = safe_exists(p, follow_symlinks=follow_symlinks)
     if not exists:
         raise FileNotFoundError(f"No such directory: {os.fspath(p)}")
     if not allow_symlink and p.is_symlink():
@@ -3067,6 +3066,47 @@ IGNORE_THESE_ERRORS: Final[frozenset[int]] = frozenset(
         getattr(errno, "ESTALE", None),   # NFS: stale file handle (may not exist)
     } if e is not None
 )
+
+
+def safe_exists(path: str | os.PathLike[str],
+                follow_symlinks: bool = True) -> bool:
+    """
+    Like Path.exists()/os.path.lexists(), but doesn't raise on permission/loop errors.
+
+    Args:
+        path:            The path to check.
+        follow_symlinks: If False, do not follow symlinks when checking if it exists.
+
+    Returns:
+        True if the path appears to exist (respecting follow_symlinks), False if it doesn't.
+        For certain access/loop issues, returns True to avoid misclassifying as 'missing'.
+    """
+    p = path if isinstance(path, Path) else ensure_path(path)
+
+    if not follow_symlinks:
+        # lexists() doesn't raise for permission and treats a symlink itself as 'exists'
+        return os.path.lexists(os.fspath(p))
+
+    try:
+        return p.exists()
+    except PermissionError:
+        # Treat as 'exists but inaccessible' to avoid raising FileNotFoundError upstream
+        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            "%s: permission denied: %s", return_method_name(), os.fspath(p)
+        )
+        return True
+    except OSError as e:
+        # Fine-grained handling: missing vs. other transient/loop errors
+        if e.errno in (errno.ENOENT, errno.ENOTDIR):
+            return False
+        if e.errno in IGNORE_THESE_ERRORS:
+            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                "%s: suppressed errno=%s (%s): %s", return_method_name(),
+                e.errno, getattr(errno, "errorcode", {}).get(e.errno, "?"), os.fspath(p)
+            )
+            # assume it exists but is problematic (loop, access, stale handle)
+            return True
+        raise
 
 
 def safe_is_file(path: str | os.PathLike[str],
@@ -3273,7 +3313,7 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
 
     # Remove any stale partial to avoid skewing free-space checks.
     try:
-        if temp.exists():
+        if safe_exists(temp):
             temp.unlink()
     except OSError:
         # If we can't remove it, we'll truncate on open later; free-space check may be conservative.
@@ -3295,7 +3335,7 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
 
     if expected is not None:
         # Skip re-download if size matches on disk already.
-        if dest.exists():
+        if safe_exists(dest):
             try:
                 if (dest_size := safe_size(dest)) is not None and dest_size == expected:
                     logging.info("File already present with expected size; skipping: %s", os.fspath(dest))
@@ -3383,7 +3423,7 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
             break
         finally:
             try:
-                if not succeeded and temp.exists():
+                if not succeeded and safe_exists(temp):
                     temp.unlink()
             except OSError:
                 pass
@@ -3413,7 +3453,7 @@ def query_free_space(path: str | os.PathLike[str]) -> int:
     base = p if safe_is_dir(p) else p.parent
 
     # Climb up until we find an existing directory.
-    while not base.exists():
+    while not safe_exists(base):
         if base == base.parent:
             raise FileNotFoundError(f"No existing parent found for {path!r}")
         base = base.parent
@@ -3459,7 +3499,7 @@ def find_ffmpeg() -> str | None:
         None
 
     Returns:
-        The path to the ffmpeg executable or None if not found.
+        A string containing the path to the ffmpeg executable or None if not found.
 
     Raises:
         None
@@ -3468,14 +3508,16 @@ def find_ffmpeg() -> str | None:
     # 1) Explicit env vars (user can set one of these)
     for env_key in ("FFMPEG", "FFMPEG_PATH", "IMAGEIO_FFMPEG_EXE"):
         p = os.environ.get(env_key)
-        if p and Path(p).exists():
-            return os.fspath(Path(p))
+        if p:
+            p = ensure_file(p)
+            return os.fspath(p)
 
     # 2) On PATH (handles .exe on Windows automatically)
     for name in ("ffmpeg", "ffmpeg.exe"):
         p = shutil.which(name)
         if p:
-            return p
+            p = ensure_file(p)
+            return os.fspath(p)
 
     # 3) Typical Conda/Miniconda/Mambaforge locations
     sp = Path(sys.prefix)  # current Python env prefix
@@ -3498,14 +3540,15 @@ def find_ffmpeg() -> str | None:
     try:
         import imageio_ffmpeg  # type: ignore
         p = imageio_ffmpeg.get_ffmpeg_exe()
-        if p and Path(p).exists():
-            return os.fspath(Path(p))
+        if p:
+            p = ensure_file(p)
+            return os.fspath(p)
     except Exception:
         pass
 
     for c in candidates:
-        if c.exists():
-            return str(c)
+        if safe_exists(c):
+            return os.fspath(c)
 
     return None
 
@@ -4920,7 +4963,7 @@ def compile_code(source_or_filepath: str | os.PathLike[str],
         force_source:       If True, treat 'source_or_filepath' as a source code string even if it looks like a file path.
 
     Returns:
-        bool: True if compilation succeeds, False if it fails with a SyntaxError or other exception
+        True if compilation succeeds, False if it fails with a SyntaxError or other exception
 
     Raises:
         SyntaxError: If the source code has a syntax error, it will be logged and False is returned.
@@ -5210,7 +5253,7 @@ def check_python_formatting(path: str | os.PathLike[str], diff_choice: int = 1) 
         diff_choice: How many context lines to show in the diff (0 = old-style diff, 1 = unified diff with 0 context lines, 2+ = unified diff with 'diff_choice - 1' context lines).
 
     Returns:
-        bool: False if the user chose to quit during any replacement prompts, True otherwise.
+        False if the user chose to quit during any replacement prompts, True otherwise.
 
     Raises:
         FileNotFoundError: If the specified file does not exist.
@@ -5308,11 +5351,11 @@ def run_flake8(options: Options, path: str | os.PathLike[str],
         import bugbear  # noqa: F401
         # "B" = All standard Bugbear rules (B001...B8xx). "B9" = All optional/opinionated B9xx rules.
         options.bugbear_choice = "B,B9"
+        logging.info("Using flake8-bugbear checks.")
     except ImportError:
+        logging.error("flake8-bugbear is not installed, so no Bugbear checks will be performed.")
         options.bugbear_choice = None
     fallback_logging_config()
-    if options.bugbear_choice:
-        logging.info("Using flake8-bugbear checks.")
     if ignore_codes is None:
         ignore_codes: list[str] = []
     if not isinstance(ignore_codes, list):
@@ -5321,10 +5364,11 @@ def run_flake8(options: Options, path: str | os.PathLike[str],
         raise TypeError("All elements in 'ignore_codes' must be strings.")
     path        = ensure_file(path)
     kwargs = dict(max_line_length=max_line_length, ignore=ignore_codes)
-    codes = tuple(c.strip() for c in options.bugbear_choice.split(",") if c.strip())
-    kwargs["extend_select"] = codes
-    if any(c in {"B9", "B950"} for c in codes):
-        kwargs["extend_ignore"] = ("E501",)  # E501 is redundant if B9xx rules are enabled
+    if options.bugbear_choice:
+        codes  = tuple(c.strip() for c in options.bugbear_choice.split(",") if c.strip())
+        kwargs["extend_select"] = codes
+        if any(c in {"B9", "B950"} for c in codes):
+            kwargs["extend_ignore"] = ("E501",)  # E501 is redundant if B9xx rules are enabled
     style_guide = flake8.get_style_guide(**kwargs)
     report      = style_guide.check_files([path])
     if report.total_errors == 0:
@@ -5585,32 +5629,47 @@ def my_diff(orig_text:     str, changed_text: str,
         nonlocal hunk_entries
         if not hunk_entries:
             return
+        # Partition current hunk entries.
         deletes = [e for e in hunk_entries if e[0] == "-"]
         inserts = [e for e in hunk_entries if e[0] == "+"]
+        # We'll pair in order: kth delete with kth insert.
         pair_count = min(len(deletes), len(inserts))
-        di = ii = 0
+        di = 0
+        # Track which 'new' line numbers have already been consumed by a pairing
+        # (so we can skip printing those '+' entries when the loop hits them later).
+        consumed_new_line_numbers: set[int] = set()
         for tag, text, dln, nln in hunk_entries:
             if tag == "-":
                 if di < pair_count:
+                    # Compare this delete with its paired insert.
                     old_vis = _vis_trailing_ws(text)
-                    new_vis = _vis_trailing_ws(inserts[di][1])
-                    old_hl, new_hl = highlight_changes(
-                        old_vis, new_vis,
-                        unchanged_color=changed_color,  # this is confusing but correct. "The unchanged parts in the changed line"
-                        added_color=added_color,
-                        deleted_color=deleted_color
-                    )
+                    new_text = inserts[di][1]
+                    new_nln  = inserts[di][3]
+                    new_vis  = _vis_trailing_ws(new_text)
+                    # Mark the paired '+' as consumed, regardless of identical/different.
+                    consumed_new_line_numbers.add(new_nln)
+                    # If identical after visibility transform, emit nothing (no context).
+                    if old_vis == new_vis:
+                        di += 1
+                        continue
+                    # Otherwise, highlight differences.
+                    old_hl, new_hl = highlight_changes(old_vis, new_vis,
+                                                       unchanged_color=changed_color,
+                                                       added_color=added_color,
+                                                       deleted_color=deleted_color)
                     logging.info(f"< {dln:>{the_digits}}: {old_hl}{ANSI_RESET}")
-                    logging.info(f"{changed_color}> {inserts[di][3]:>{the_digits}}:{ANSI_RESET} {new_hl}{ANSI_RESET}")
+                    logging.info(f"{changed_color}> {new_nln:>{the_digits}}:{ANSI_RESET} {new_hl}{ANSI_RESET}")
+                    di += 1
                 else:
-                    logging.info(f"< {dln:>{the_digits}}: "
-                                 f"{deleted_color}{_vis_trailing_ws(text)}{ANSI_RESET}")
-                di += 1
+                    # Unpaired delete (pure removal in this hunk).
+                    logging.info(f"< {dln:>{the_digits}}: {deleted_color}{_vis_trailing_ws(text)}{ANSI_RESET}")
             elif tag == "+":
-                if ii >= pair_count:
-                    logging.info(f"{changed_color}> {nln:>{the_digits}}:{ANSI_RESET} "
-                                 f"{ANSI_RED}{_vis_trailing_ws(text)}{ANSI_RESET}")
-                ii += 1
+                # If this '+' was already paired (even if identical), skip it.
+                if nln in consumed_new_line_numbers:
+                    continue
+                # Unpaired insert (pure addition in this hunk).
+                vis = _vis_trailing_ws(text)
+                logging.info(f"{changed_color}> {nln:>{the_digits}}:{ANSI_RESET} {ANSI_RED}{vis}{ANSI_RESET}")
         hunk_entries.clear()
 
     def flush_removed(orig_lineno: int) -> None:
@@ -5695,7 +5754,7 @@ def is_python_script(path: str | os.PathLike[str]) -> bool:
         path: The file path to check.
 
     Returns:
-        bool: True if the path is a Python script, False otherwise.
+        True if the path is a Python script, False otherwise.
 
     Raises:
         IsADirectoryError: If the path is a directory.
@@ -5758,7 +5817,7 @@ def diff_and_confirm(orig_text: str, changed_text: str,
         description:   A longer description of the issue being fixed (default "").
 
     Returns:
-        bool: False if the user chose to quit; True otherwise.
+        False if the user chose to quit; True otherwise.
 
     Raises:
         FileNotFoundError: If the specified file does not exist.
@@ -5817,7 +5876,7 @@ def ask_and_autopep8(path: str | os.PathLike[str], code: str,
         added_color:   Color to use for the added characters in changed lines (default ANSI_GREEN).
 
     Returns:
-        bool: True if the user wants to continue, False if they want to quit.
+        True if the user wants to continue, False if they want to quit.
 
     Raises:
         FileNotFoundError: If the specified file does not exist.
@@ -5921,7 +5980,7 @@ def _resolve_dir(dir_arg: str | None) -> Path:
         p = ensure_path(dir_arg)
     else:
         p = Path.cwd().expanduser().resolve(strict=True)
-    if not p.exists():
+    if not safe_exists(p):
         raise FileNotFoundError(f"Directory does not exist: {os.fspath(p)}")
     if not safe_is_dir(p):
         raise NotADirectoryError(f"Path is not a directory: {os.fspath(p)}")
@@ -6012,7 +6071,7 @@ def interactive_flake8(options: Options,
                        max_line_length: int = 100,
                        changed_color:   str = ANSI_CYAN,
                        deleted_color:   str = ANSI_RED,
-                       added_color:     str = ANSI_YELLOW) -> None:
+                       added_color:     str = ANSI_YELLOW) -> bool:
     """
     1) Run the flake8 API for summary counts.
     2) Shell out to flake8 CLI once to harvest one description per code.
@@ -6030,6 +6089,9 @@ def interactive_flake8(options: Options,
         changed_color:   Color for unchanged characters in changed lines (default: ANSI_CYAN).
         deleted_color:   Color for deleted characters in original lines (default: ANSI_RED).
         added_color:     Color for added characters in changed lines (default: ANSI_YELLOW).
+
+    Returns:
+        False if the user chose to quit during any replacement prompts, True otherwise.
     """
     fallback_logging_config()
     path = ensure_file(path)
@@ -6038,7 +6100,7 @@ def interactive_flake8(options: Options,
         ignore_codes: list[str] = []
     if not run_flake8(options, path, ignore_codes=ignore_codes, max_line_length=max_line_length):
         logging.info("No flake8 errors—nothing to do.")
-        return
+        return True
     codes = _gather_flake8_issues(options, path, ignore_codes=ignore_codes, max_line_length=max_line_length)
     fixable_codes = get_autopep8_fixable_codes()
     logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Autopep8 can fix these codes: %s", fixable_codes)
@@ -6050,14 +6112,54 @@ def interactive_flake8(options: Options,
         logging.info("\n→ %s: %s", ANSI_RED + code + ANSI_RESET, ANSI_YELLOW + desc + ANSI_RESET)
         if not ask_and_autopep8(path, code, desc, diff_choice=diff_choice,
                                 changed_color=changed_color, deleted_color=deleted_color, added_color=added_color):
-            break
+            return False
         touched_code = True
     if touched_code:
         logging.info("%sDone. Re-running flake8 to confirm fixes...%s", ANSI_GREEN, ANSI_RESET)
         run_flake8(options, path, ignore_codes=ignore_codes, max_line_length=max_line_length)
     else:
         logging.info("No fixable flake8 codes found or no changes made.")
+    return True
+
+
+def run_mypy(options: Options,
+             path: str | os.PathLike[str]) -> None:
+    """
+    Run basic mypy static analysis on the specified file.
+    
+    Args:
+        options: The parsed command-line options. (Currently unused but included for consistency.)
+        path:    Path to the Python file to analyze.
+    
+    Returns:
+        None.
+    """
+    try:
+        from importlib import import_module
+        mypy_api = import_module("mypy.api")
+    except ModuleNotFoundError:
+        logging.error("mypy is not installed.")
         return
+
+    # Note: mypy analyzes files (not raw strings), so we pass the path.
+    # This is the most basic run with default settings.
+    mypy_stdout, mypy_stderr, mypy_exit = mypy_api.run([str(path)])
+
+    # You can inspect these variables or integrate them with your own logging/handling:
+    #   - mypy_stdout: str with human-readable diagnostics
+    #   - mypy_stderr: str with internal mypy errors (if any)
+    #   - mypy_exit:   int exit code (0 = success, 1 = type issues found, 2 = mypy failure)
+    if mypy_stdout:
+        logging.info("mypy output:\n%s", mypy_stdout)
+    if mypy_stderr:
+        logging.error("mypy internal errors:\n%s", mypy_stderr)
+    if mypy_exit == 0:
+        logging.info("mypy completed successfully with no type issues.")
+    elif mypy_exit == 1:
+        logging.warning("mypy completed with type issues found.")
+    else:
+        logging.error("mypy failed with exit code %d.", mypy_exit)
+
 
 # - Use {str(univ_defs_dir)!r} so Windows backslashes are safely escaped in the string literal.
 # - Double the braces around 'univ_defs_dir' in the f-string to keep them literal in the written file.
@@ -6201,6 +6303,7 @@ def main() -> None:
                           ignore_codes=ud.IGNORED_CODES, max_line_length=1000,
                           changed_color=options.args.changed_color, deleted_color=options.args.deleted_color,
                           added_color=options.args.added_color)
+    ud.run_mypy(options, options.args.filepath)
     ud.print_all_errors(memory_handler)
     logging.shutdown()
 
@@ -6345,7 +6448,7 @@ import io
 import logging
 import re
 from pathlib import Path
-from typing import Iterable
+from collections.abc import Iterable
 
 import tokenize  # stdlib
 
@@ -6888,8 +6991,8 @@ def treeview_new_files(directory:      str | os.PathLike[str],
                         files (default False).
 
     Returns:
-        bool: True if any relevant files are found or the directory itself is newer than last_mtime,
-              False otherwise.
+        True if any relevant files are found or the directory itself is newer than last_mtime,
+        False otherwise.
 
     Raises:
         None: Catches exceptions, logs an error and returns False if the directory is not a valid
@@ -6899,7 +7002,7 @@ def treeview_new_files(directory:      str | os.PathLike[str],
     fallback_logging_config(rawlog=True)
 
     directory = ensure_path(directory)
-    if not directory.exists():
+    if not safe_exists(directory):
         logging.error(f"{prefix}└── [Directory does not exist: {os.fspath(directory)}]")
         return False
     if not safe_is_dir(directory):
@@ -6911,7 +7014,7 @@ def treeview_new_files(directory:      str | os.PathLike[str],
         logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("%sNo last file path provided, considering all files.", prefix)
     else:
         last_file_path = ensure_path(last_file_path)
-        if not last_file_path.exists():
+        if not safe_exists(last_file_path):
             logging.error("%s└── [Last file path does not exist: %s]", prefix, os.fspath(last_file_path))
             return False
         last_mtime          = safe_mtime(last_file_path)
@@ -7075,7 +7178,7 @@ def check_if_command_exists(command: str) -> bool:
         command: The command to check.
 
     Returns:
-        bool: True if the command exists, False otherwise.
+        True if the command exists, False otherwise.
     """
     import subprocess
     return subprocess.run(["which", command], capture_output=True).returncode == 0
@@ -7220,7 +7323,7 @@ def open_filemanager_with_dirs(directories: list[str | os.PathLike[str]]) -> Non
     logging.info("Opening file manager with specified directories...")
     for directory in directories:
         directory = ensure_path(directory)
-        if not directory.exists():
+        if not safe_exists(directory):
             logging.error(f"Directory {os.fspath(directory)} does not exist. Skipping.")
             continue
         if not safe_is_dir(directory):
@@ -7424,7 +7527,7 @@ def set_system_volume(percent: int, tolerance: int = 1,
     logging.info("[pactl] Volume set to %d%%", percent)
 
 
-def open_playlist_in_VLC(playlist: str | os.PathLike[str], no_start:  bool = False) -> None:
+def open_playlist_in_VLC(playlist: str | os.PathLike[str], no_start: bool = False) -> None:
     """Open a playlist in VLC. If no_start is True, don't start playback in VLC."""
     import subprocess
     playlist = ensure_file(playlist)
@@ -7437,6 +7540,7 @@ def open_dir_in_VLC(the_dir: str | os.PathLike[str], sort_choice: str = "sort_by
                     recursive: bool = False, no_start:  bool = False) -> None:
     """Create a playlist of the files in the specified directory, then play that playlist in VLC. By default, don't search the directory recursively and sort the files by name. Optional arguments allow recursive loading or sorting by modification time. If no_start is True, don't start playback in VLC."""
     import subprocess
+    from collections.abc import Iterable
     if the_dir is None:
         raise ValueError("The directory path cannot be None.")
     the_dir = ensure_dir(the_dir)
@@ -7499,7 +7603,7 @@ def remove_prefix_from_filename(filepath: str | os.PathLike[str], prefix: str) -
     """
     fallback_logging_config()
     filepath = ensure_path(filepath)
-    if not filepath.exists():
+    if not safe_exists(filepath):
         logging.warning("File or directory '%s' does not exist.", os.fspath(filepath))
         return False
     file = filepath.name
@@ -7509,7 +7613,7 @@ def remove_prefix_from_filename(filepath: str | os.PathLike[str], prefix: str) -
         while new_file[0] in " _-":
             new_file = new_file[1:]
         new_filepath = filepath.parent / new_file
-        if not new_filepath.exists():
+        if not safe_exists(new_filepath):
             try:
                 filepath.rename(new_filepath)
                 logging.info("Renamed '%s' to '%s'.", os.fspath(filepath), os.fspath(new_filepath))
