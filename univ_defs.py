@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path  # Preferred over os.path for path manipulations.
 import logging
-from collections.abc import Sequence
+from collections.abc import Sequence, Callable, Iterable
 from itertools import chain
 from typing import TextIO, Any, TypeAlias, Type, Literal, Protocol, Final
 import re  # Used to precompile regexes for performance
@@ -573,7 +573,6 @@ class LLMs:
         self._litellm_mod:                            Any | None = None
         self._legacy_available:                             bool = False
         self._register_builtin_strategies()
-        self.init_llms()  # sets up legacy clients
 
         # Legacy direct API access:
         from types import ModuleType
@@ -586,6 +585,7 @@ class LLMs:
         self.clients:                             dict[str, Any] = {}
         self.model:   str = "gpt-3.5-turbo"
         self.company: str = "OpenAI"
+        self.init_llms()  # sets up legacy clients
 
     # ---------- vendor discovery (legacy) ----------
     def init_llms(self) -> None:
@@ -1946,7 +1946,6 @@ def show_function_source(target: object | str, *, unwrap: bool = True,
     import inspect
     import pydoc
     import io
-    from collections.abc import Callable
     # Resolve the object if 'target' is a string
     if isinstance(target, str):
         name = target
@@ -5989,7 +5988,6 @@ def _resolve_dir(dir_arg: str | None) -> Path:
 
 def _collect_files(root: Path, pattern: str, recursive: bool) -> list[Path]:
     """Collect files matching the glob pattern from root."""
-    from collections.abc import Iterable
     search_iter: Iterable[Path]
     if recursive:
         search_iter = root.rglob(pattern)
@@ -7170,6 +7168,104 @@ def treeview_new_files(directory:      str | os.PathLike[str],
     return should_show
 
 
+def ensure_docker_installed() -> None:
+    """Check if the Docker CLI is installed; if not, raise an error."""
+    import shutil
+    if shutil.which("docker") is not None:
+        return
+    my_critical_error("Docker CLI not found. Please install Docker: https://docs.docker.com/get-docker/")
+
+
+def ensure_daemon_running() -> None:
+    """Check if the Docker daemon is running; if not, attempt to start it."""
+    info = my_popen(["docker", "info"])
+    if info.success:
+        return
+    logging.info("Docker daemon not running; attempting to start it...")
+    if sys.platform.startswith("linux"):
+        start = my_popen(["sudo", "systemctl", "start", "docker"])
+        if not start.success:
+            start = my_popen(["sudo", "service", "docker", "start"])
+        if not start.success:
+            my_critical_error(f"Could not start Docker daemon:\n{start.stderr}")
+    elif sys.platform == "darwin":
+        launcher = my_popen(["open", "-a", "Docker"])
+        if not launcher.success:
+            my_critical_error("Failed to launch Docker Desktop. Please start it from your Applications folder.")
+        # Wait for the daemon to start...
+        for _ in range(10):
+            time.sleep(3)
+            info = my_popen(["docker", "info"])
+            if info.success:
+                logging.info("Docker daemon is running!")
+                return
+        my_critical_error("Docker Desktop did not finish starting within 30 seconds.\nPlease open Docker Desktop manually.")
+    else:
+        my_critical_error(f"Unsupported OS for auto-starting Docker: {sys.platform}")
+
+
+def ensure_image_built(image: str, *,
+                       dockerfile: Path | None = None,
+                       build_dir:  Path | None = None,
+                       build_cmd:   str | None = None) -> None:
+    """
+    Ensure that a Docker image with the given name exists; if not, build it.
+    You can specify either a dockerfile (whose first line is a comment with the build command)
+    or a build_cmd (and optionally a build_dir). If both dockerfile and build_cmd are None,
+    the function will raise an error.
+    """
+    inspect = my_popen(["docker", "image", "inspect", image])
+    if inspect.success:
+        return
+
+    if build_cmd is None:
+        if dockerfile is None:
+            my_critical_error(f"Image {image} missing and no build_cmd/dockerfile provided")
+        try:
+            first = open(dockerfile, "r").readline().strip()
+        except OSError:
+            my_critical_error(f"Cannot read {os.fspath(dockerfile)} to build {image}")
+        if not first.startswith("#"):
+            my_critical_error(f"No build command found in {os.fspath(dockerfile)}")
+        build_cmd = first.lstrip("# ").strip()
+        if build_dir is None:
+            build_dir = dockerfile.parent
+
+    # run build_cmd in build_dir
+    import shlex
+    full_cmd = f"cd {shlex.quote(os.fspath(build_dir or Path.cwd()))} && {build_cmd}"
+    build = my_popen(["sh", "-c", full_cmd])
+    if not build.success:
+        my_critical_error(f"Failed to build {image}:\n{build.stderr}")
+
+
+def run_with_docker_fixes(base_args: list[str], *,
+                          ensure_build:         Callable[[], None]  | None = None,
+                          extra_fixes: Iterable[Callable[[], None]] | None = None) -> MyPopenResult:
+    """
+    Run a command (typically 'docker run ...') and if it fails, attempt to fix
+    common Docker issues (like Docker not installed or daemon not running) and retry.
+    """
+    fixes = [ensure_docker_installed, ensure_daemon_running]
+    if ensure_build is not None:
+        fixes.append(ensure_build)
+    if extra_fixes:
+        fixes.extend(extra_fixes)
+
+    last = None
+    for fix in fixes:
+        last = my_popen(base_args)
+        if last.success:
+            return last
+        logging.info("docker run failed; attempting to fix: %s", fix.__name__)
+        fix()
+
+    last = my_popen(base_args)
+    if last.success:
+        return last
+    my_critical_error(f"After applying all fixes, still failed:\n{last.stderr}")
+
+
 def check_if_command_exists(command: str) -> bool:
     """
     Check if a command exists on the system.
@@ -7540,7 +7636,6 @@ def open_dir_in_VLC(the_dir: str | os.PathLike[str], sort_choice: str = "sort_by
                     recursive: bool = False, no_start:  bool = False) -> None:
     """Create a playlist of the files in the specified directory, then play that playlist in VLC. By default, don't search the directory recursively and sort the files by name. Optional arguments allow recursive loading or sorting by modification time. If no_start is True, don't start playback in VLC."""
     import subprocess
-    from collections.abc import Iterable
     if the_dir is None:
         raise ValueError("The directory path cannot be None.")
     the_dir = ensure_dir(the_dir)
