@@ -133,7 +133,6 @@ class SelectionStrategy(str, Enum):
 class LLMConfig:
     """Configuration for LLM selection and usage. Data only."""
     # Routing / engines
-    use_litellm:        bool = True
     allow_local_models: bool = True
     use_local_model:    bool = False
     local_model_name:    str = "ollama/qwen2.5-coder:1.5b-base"
@@ -149,10 +148,6 @@ class LLMConfig:
 
     # Candidates + scoring
     candidate_models:    list[str] = field(default_factory=list)    # if empty -> _default_candidate_models()
-
-    # Back-compat defaults (filled after selection)
-    default_model:   str = "gpt-3.5-turbo"
-    default_company: str = "OpenAI"
 
     # Optional: commonly-used knobs some programs keep near config
     default_temperature: float = 0.0
@@ -232,8 +227,7 @@ class StrategyFn(Protocol):
 
 class LLMs:
     """
-    - Owns legacy vendor SDK clients (OpenAI/Anthropic)
-    - Optionally routes via LiteLLM
+    - Routes via LiteLLM
     - Builds ModelInfo list, filters by availability/context
     - Applies registered/built-in selection strategy
     - Exposes stable send_prompt(...)
@@ -558,10 +552,7 @@ class LLMs:
 
     # ---------- public lifecycle ----------
     def __init__(self) -> None:
-        """
-        Initialize legacy vendors immediately (keeps backward compat).
-        LiteLLM is lazy-initialized when/if config.use_litellm is True.
-        """
+        """Initialize LLMs manager. Call apply_config() before use."""
         # LiteLLM configuration:
         self._config:                           LLMConfig | None = None
         self._selected:                         ModelInfo | None = None
@@ -569,68 +560,29 @@ class LLMs:
         self._strategies:                  dict[str, StrategyFn] = {}
         self._last_strategy:                                 str = str(SelectionStrategy.CHEAPEST.value)
         self._pricing_cache: dict[str, tuple[float, float, int]] = {}
-        self._litellm_ready:                                bool = False
+        self._litellm_ready:                                bool = False  # True when/if LiteLLM client has been imported
         self._litellm_mod:                            Any | None = None
-        self._legacy_available:                             bool = False
         self._register_builtin_strategies()
 
-        # Legacy direct API access:
-        from types import ModuleType
-        self.llms: list[dict[str, str]] = [
-            {"name": "OpenAI",    "module": "openai",    "env_var": "OPENAI_API_KEY"},
-            {"name": "Anthropic", "module": "anthropic", "env_var": "ANTHROPIC_API_KEY"},
-        ]
-        self.found_llms:                         dict[str, bool] = {}
-        self.llm_modules:                  dict[str, ModuleType] = {}
-        self.clients:                             dict[str, Any] = {}
-        self.model:   str = "gpt-3.5-turbo"
-        self.company: str = "OpenAI"
-        self.init_llms()  # sets up legacy clients
+    @property
+    def selected(self) -> ModelInfo | None:
+        """Read-only handle to the currently selected model (or None)."""
+        return self._selected
 
-    # ---------- vendor discovery (legacy) ----------
-    def init_llms(self) -> None:
-        """Discover legacy vendor SDKs + clients."""
-        for llm in self.llms:
-            this_llm = llm["name"]
-            this_key = llm["env_var"]
-            try:
-                if this_llm == "OpenAI":
-                    import openai  # type: ignore
-                    self.llm_modules[this_llm] = openai
-                elif this_llm == "Anthropic":
-                    import anthropic  # type: ignore
-                    self.llm_modules[this_llm] = anthropic
-                else:
-                    my_critical_error(f"Unknown LLM: {this_llm}")
+    @property
+    def model(self) -> str | None:
+        """Selected model name."""
+        return self._selected.name     if self._selected else None
 
-                msg = f"{this_llm} package found"
-                if this_key in os.environ:
-                    self.found_llms[this_llm] = True
-                    msg += f", and the {this_key} environment variable is set."
-                else:
-                    self.found_llms[this_llm] = False
-                    msg += f", but the {this_key} environment variable is not set, so the {this_llm} package cannot be used."
-                print(msg)
-            except ImportError as e:
-                self.found_llms[this_llm] = False
-                print(f"{this_llm} package not found, so it cannot be used. Error: {e}")
-
-        # Create legacy clients for available SDKs
-        for llm_name, ok in self.found_llms.items():
-            if not ok:
-                continue
-            if   llm_name == "OpenAI":
-                self.clients[llm_name] = self.llm_modules[llm_name].OpenAI()
-            elif llm_name == "Anthropic":
-                self.clients[llm_name] = self.llm_modules[llm_name].Anthropic()
-
-        self._legacy_available = any(self.found_llms.values())
+    @property
+    def provider(self) -> str | None:
+        """Selected provider name."""
+        return self._selected.provider if self._selected else None
 
     # ---------- config application ----------
     def apply_config(self, config: LLMConfig) -> None:
         """
-        Store config, hydrate defaults, compute candidates, select a model,
-        then set self.model/self.company for back-compat.
+        Store config, hydrate defaults, compute candidates, select a model.
         """
         cfg = self._resolve_config(config)
         self._config = cfg
@@ -653,75 +605,42 @@ class LLMs:
             chosen                        = self._build_model_info(cfg.local_model_name, cfg)
             self._selected                = chosen
             self._candidates_after_filter = [chosen]
-            self.model                    = chosen.name
-            self.company                  = chosen.provider
-            self._after_selection(self.model, self.company)
+            self._after_selection(chosen.name, chosen.provider)
             return
 
-        # Build + base filter
-        raw_candidates = [self._build_model_info(m, cfg) for m in cfg.candidate_models]
-        ctx = SelectionContext(
-            tokens_in=cfg.assumed_prompt_tokens,
-            tokens_out=cfg.assumed_output_tokens,
-            min_context_tokens=cfg.min_context_tokens,
-            require_local=False,   # "prefer_local" handled in scoring, not filtering
-        )
-        filtered, reasons_map = self._filter_candidates(raw_candidates, ctx)
+        # Build pool and context with the resolved cfg
+        eff, ctx, reasons_map = self._selection_pool(cfg)
 
-        # Optional: attempt hard filters for cost/speed only if it won't nuke the pool
-        eff = filtered if filtered else raw_candidates
-        if cfg.max_estimated_cost is not None:
-            tmp = [m for m in eff if m.estimate_cost(cfg.assumed_prompt_tokens,
-                                                     cfg.assumed_output_tokens) <= cfg.max_estimated_cost]
-            if tmp:  # only keep if we still have choices
-                eff = tmp
-        if cfg.speed_floor is not None:
-            tmp = [m for m in eff if (m.speed is not None and m.speed >= cfg.speed_floor)]
-            if tmp:
-                eff = tmp
-
-        self._candidates_after_filter = eff
-        if not self._candidates_after_filter:
-            raise RuntimeError(
-                "No candidates available after filtering. "
-                "Check allow_local_models, min_context_tokens, candidate_models, and provider availability."
-            )
-
-        # attach reasons to the models we keep
-        for mi in self._candidates_after_filter:
-            mi.meta["filter_reasons"] = reasons_map.get(mi.name, [])
-
-        # Choose strategy: if user signaled multi-objective prefs, prefer the composite strategy
+        # Choose strategy (same logic you already have)
         if isinstance(cfg.selection_strategy, SelectionStrategy):
             strategy_name = cfg.selection_strategy.value
         else:
             strategy_name = str(cfg.selection_strategy)
 
         wants_multi = any([
-            cfg.prefer_code, cfg.prefer_low_TTFT, cfg.prefer_local,
-            cfg.max_estimated_cost is not None, cfg.speed_floor is not None,
-            cfg.weight_code_skill > 0.0, cfg.weight_general_skill > 0.0,
-            cfg.weight_TTFT > 0.0, cfg.weight_speed > 0.0, cfg.weight_nonlocal_penalty > 0.0,
+            cfg.prefer_code,
+            cfg.prefer_low_TTFT,cfg.prefer_local,
+            cfg.max_estimated_cost is not None,
+            cfg.speed_floor        is not None,
+            cfg.weight_code_skill       > 0.0,
+            cfg.weight_general_skill    > 0.0,
+            cfg.weight_TTFT             > 0.0,
+            cfg.weight_speed            > 0.0,
+            cfg.weight_nonlocal_penalty > 0.0,
         ])
         if wants_multi and strategy_name == SelectionStrategy.CHEAPEST.value:
             strategy_name = "multi_objective"
 
-        strategy_fn = self._strategies.get(strategy_name)
-        if strategy_fn is None:
-            strategy_name = SelectionStrategy.CHEAPEST.value
-            strategy_fn = self._strategies[strategy_name]
+        strategy_fn         = self._strategies.get(strategy_name) or \
+                              self._strategies[SelectionStrategy.CHEAPEST.value]
         self._last_strategy = strategy_name
 
-        winner         = strategy_fn(self._candidates_after_filter, ctx)
-        self._selected = winner
-        self.model     = winner.name
-        self.company   = winner.provider
-
-        for mi in raw_candidates:
-            if mi.name in reasons_map:
-                mi.meta.setdefault("filter_reasons", reasons_map[mi.name])
-
-        self._after_selection(self.model, self.company)
+        winner              = strategy_fn(eff, ctx)
+        self._selected      = winner
+        self._candidates_after_filter = eff
+        for mi in self._candidates_after_filter:
+            mi.meta["filter_reasons"] = reasons_map.get(mi.name, [])
+        self._after_selection(winner.name, winner.provider)
 
     def refresh_selection(self) -> None:
         """Re-run selection using the current LLMConfig."""
@@ -869,6 +788,79 @@ class LLMs:
                 mi.meta.pop("filter_reasons", None)
         return res
 
+    def _selection_pool(self, cfg: LLMConfig) -> tuple[list[ModelInfo], SelectionContext]:
+        """Build the effective candidate pool and SelectionContext for a given config."""
+        # Forced-local short-circuit → caller should handle, but keep this as a guard
+        if cfg.use_local_model:
+            # validate local availability (reuse the same checks as apply_config)
+            entry = self.model_info.get(cfg.local_model_name, {})
+            if not entry.get("local", False):
+                raise RuntimeError(f"cfg.use_local_model is {cfg.use_local_model} but '{cfg.local_model_name}' is not marked as local in the registry.")
+            provider = entry.get("provider", "Local")
+            if not self._is_provider_available(provider, cfg.local_model_name):
+                raise RuntimeError(
+                    f"Local model '{cfg.local_model_name}' is not available on runtime "
+                    f"'{entry.get('runtime', 'unknown')}'. Ensure the runtime is up "
+                    f"(Ollama: {cfg.ollama_base_url}) and that the model is pulled."
+                )
+            mi = self._build_model_info(cfg.local_model_name, cfg)
+            ctx = SelectionContext(
+                tokens_in=cfg.assumed_prompt_tokens,
+                tokens_out=cfg.assumed_output_tokens,
+                min_context_tokens=cfg.min_context_tokens,
+                require_local=True,
+            )
+            return [mi], ctx
+        raw_candidates = [self._build_model_info(m, cfg) for m in cfg.candidate_models]
+        ctx = SelectionContext(
+            tokens_in=cfg.assumed_prompt_tokens,
+            tokens_out=cfg.assumed_output_tokens,
+            min_context_tokens=cfg.min_context_tokens,
+            require_local=False,
+        )
+        filtered, reasons_map = self._filter_candidates(raw_candidates, ctx)
+        eff = filtered if filtered else raw_candidates
+        if cfg.max_estimated_cost is not None:
+            tmp = [m for m in eff if m.estimate_cost(cfg.assumed_prompt_tokens, cfg.assumed_output_tokens) <= cfg.max_estimated_cost]
+            if tmp:
+                eff = tmp
+        if cfg.speed_floor is not None:
+            tmp = [m for m in eff if (m.speed is not None and m.speed >= cfg.speed_floor)]
+            if tmp:
+                eff = tmp
+        if not eff:
+            raise RuntimeError(
+                "No candidates available after filtering. "
+                "Check allow_local_models, min_context_tokens, candidate_models, and provider availability."
+            )
+        return eff, ctx, reasons_map
+
+    def alternative_model(self, *, strategy: SelectionStrategy | str,
+                          return_reasons: bool = False, **cfg_overrides) -> ModelInfo:
+        """
+        Return the best candidate under a given strategy using a TEMPORARY config
+        built from the current config + partial overrides (e.g., use_local_model=True),
+        WITHOUT mutating the current selection.
+        """
+        from dataclasses import replace as _dc_replace
+        base_cfg = self.get_config()  # snapshot of current config (already resolved by apply_config)
+        # apply partial overrides
+        try:
+            tmp_cfg = _dc_replace(base_cfg, **cfg_overrides)
+        except TypeError as e:
+            raise ValueError(f"Invalid override(s): {e}")
+        # Re-resolve in case overrides trigger weight injections, etc.
+        tmp_cfg  = self._resolve_config(tmp_cfg)
+        # Build pool (handles forced-local inside)
+        eff, ctx, reasons_map = self._selection_pool(tmp_cfg)
+        # Pick strategy
+        name = strategy.value if isinstance(strategy, SelectionStrategy) else str(strategy)
+        fn = self._strategies.get(name)
+        if fn is None:
+            raise ValueError(f"Unknown strategy: {name}")
+        winner = fn(eff, ctx)
+        return (winner, reasons_map) if return_reasons else winner
+
     def describe_selection(self) -> dict[str, Any]:
         """Describe the current model selection."""
         chosen = self._selected
@@ -925,58 +917,40 @@ class LLMs:
 
     # ---------- core send method (stable) ----------
     def send_prompt(self, prompt: str, system_message: str,
-                    model: str, company: str, temperature: float,
+                    model: str, temperature: float,
                     max_tokens: int = 1000) -> str:
         """
-        If config.use_litellm: route via LiteLLM (company ignored for transport).
-        Else: use legacy vendor client keyed by 'company'.
-        Returns text content.
+        Send a prompt+system message to the specified model, return the text response.
+
+        Args:
+            prompt:         The user prompt to send.
+            system_message: The system message to include.
+            model:          The model name to use (must be in model_info).
+            temperature:    Sampling temperature.
+            max_tokens:     Maximum tokens to generate in the response.
+        
+        Returns:
+            The text response from the model.
+        
+        Raises:
+            RuntimeError: If the model is unknown or if the request fails.
+            ValueError:   If the prompt is empty.
         """
-        cfg = self._config or LLMConfig()
-        if cfg.use_litellm:
-            self._ensure_litellm()
-            litellm = self._litellm_mod  # type: ignore
-
-            extra = self._extra_litellm_args_for(model)
-            try:
-                resp = litellm.completion(
-                    model=model,
-                    messages=[{"role": "system", "content": system_message},
-                              {"role": "user",   "content": prompt}],
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    **extra
-                )
-            except Exception as e:
-                my_critical_error(f"LiteLLM request failed for model '{model}': {e}")
-
-            return self._extract_text_from_openai_like(resp)
-
-        # --- Legacy vendor paths preserved as before ---
-        if company == "OpenAI":
-            if "OpenAI" not in self.clients:
-                my_critical_error("OpenAI client not initialized or OPENAI_API_KEY not set.")
-            response_obj = self.clients["OpenAI"].chat.completions.create(
+        self._ensure_litellm()
+        litellm = self._litellm_mod  # type: ignore
+        extra   = self._extra_litellm_args_for(model)
+        try:
+            resp = litellm.completion(
                 model=model,
-                temperature=temperature,
                 messages=[{"role": "system", "content": system_message},
                           {"role": "user",   "content": prompt}],
-            )
-            return response_obj.choices[0].message.content
-        elif company == "Anthropic":
-            if "Anthropic" not in self.clients:
-                my_critical_error("Anthropic client not initialized or ANTHROPIC_API_KEY not set.")
-            response_obj = self.clients["Anthropic"].messages.create(
-                model=model,
-                max_tokens=max_tokens,
                 temperature=temperature,
-                system=system_message,
-                messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+                max_tokens=max_tokens,
+                **extra
             )
-            return response_obj.content[0].text
-        else:
-            my_critical_error(f"Unknown company: {company}")
-            return ""  # unreachable
+        except Exception as e:
+            my_critical_error(f"LiteLLM request failed for model '{model}': {e}")
+        return self._extract_text_from_openai_like(resp)
 
     # ====================================================
     # overridable hooks (tiny, intentional)
@@ -1029,9 +1003,6 @@ class LLMs:
                     scores.update(data)
             except Exception as e:
                 logging.warning("Failed to load LLM_MODEL_SCORES_JSON from %s: %s", json_path_str, e)
-
-        if not config.use_litellm:
-            cands = [m for m in cands if not self.model_info.get(m, {}).get("local", False)]
 
         hydrated = replace(config, candidate_models=cands, model_scores=scores)
 
@@ -1353,7 +1324,7 @@ class LLMs:
             return 0
 
         if model is None:
-            model = getattr(self, "model", None) or ""
+            model = self._selected.name if self._selected else ""
 
         entry    = self.model_info.get(model, {})
         runtime  = (entry.get("runtime") or "").strip().casefold()
@@ -7957,6 +7928,104 @@ TEXT_EXTENSIONS: Final[tuple[str, ...]] = (
 TEXT_EXTENSIONS_SET: Final[frozenset[str]] = frozenset(TEXT_EXTENSIONS)
 # assert len(TEXT_EXTENSIONS_SET) == len(TEXT_EXTENSIONS), "Duplicate text extensions?"
 
+# A comprehensive list of book / ebook extensions (textual & comic-book archives).
+BOOK_EXTENSIONS: Final[tuple[str, ...]] = (
+    # Open / widely supported ebooks
+    ".epub",     # EPUB (most common open ebook format)
+    ".pdf",      # PDF (widely used for ebooks, especially textbooks)
+    ".txt",      # Plain text
+    ".rtf",      # Rich Text Format
+    ".html",     # HTML
+    ".htm",      # HTML
+    ".xhtml",    # XHTML
+    ".doc",      # Microsoft Word (legacy binary format)
+    ".docx",     # Microsoft Word (modern XML-based format)
+    ".odt",      # OpenDocument Text
+
+    # Amazon / Kindle family
+    ".azw",      # Kindle (based on MOBI)
+    ".azw1",     # Kindle Topaz (legacy)
+    ".azw3",     # Kindle KF8
+    ".azw4",     # Kindle Print Replica (PDF-like)
+    ".azw6",     # Kindle KFX resource container
+    ".kfx",      # Kindle KFX
+    ".mobi",     # Mobipocket
+    ".prc",      # Mobipocket (often identical container)
+    ".tpz",      # Kindle Topaz (legacy)
+
+    # Apple iBooks
+    ".ibooks",
+
+    # FictionBook
+    ".fb2",
+    ".fbz",      # zipped FB2
+
+    # DjVu (scanned books)
+    ".djvu",
+    ".djv",
+
+    # Legacy / less common ebook formats
+    ".lit",      # Microsoft Reader
+    ".oeb",      # Open eBook
+    ".oebzip",   # zipped OEB
+    ".pdb",      # Palm/eReader container (various subtypes)
+    ".pml",      # Palm Markup Language (often paired with PDB)
+    ".pmlz",     # zipped PML
+    ".tr2",      # TomeRaider
+    ".tr3",      # TomeRaider
+    ".rb",       # Rocket eBook
+    ".tcr",      # Psion/TECsoft TCR
+    ".chm",      # Compiled HTML Help (commonly used for tech ebooks)
+    ".snb",      # Shanda Bambook
+    ".umd",      # UMD eBook (popular in some regions)
+
+    # Comic-book archives (graphic novels / manga)
+    ".cbz",      # ZIP-based
+    ".cbr",      # RAR-based
+    ".cb7",      # 7z-based
+    ".cbt",      # TAR-based
+    ".cba",      # ACE-based
+
+    # Sony BBeB family
+    ".lrf",      # Sony BBeB
+    ".lrx",      # Sony BBeB (encrypted)
+    ".lrs",      # Sony BBeB XML source
+
+    # Kobo
+    ".kepub",    # Kobo Kepub variant
+
+    # Apple authoring/export
+    ".iba",      # iBooks Author package/export
+    ".pages",    # Apple Pages document (often used for manuscripts)
+
+    # Apabi / CN markets
+    ".ceb",      # Apabi eBook
+    ".xeb",      # Apabi eBook (variant)
+
+    # Paginated document formats
+    ".xps",      # XML Paper Specification
+    ".oxps",     # OpenXPS
+
+    # Print/TeX outputs (often used for books)
+    ".ps",       # PostScript
+    ".dvi",      # TeX DVI
+
+    # Source/book authoring text formats
+    ".tex",      # LaTeX source
+    ".rst",      # reStructuredText
+    ".md",       # Markdown
+    ".markdown", # Markdown (long extension)
+
+    # Desktop publishing / layout sources
+    ".indd",     # Adobe InDesign document
+    ".idml",     # Adobe InDesign Markup Language
+    ".qxp",      # QuarkXPress project
+    ".qxd",      # QuarkXPress document
+    ".sla",      # Scribus document
+)
+BOOK_EXTENSIONS_SET: Final[frozenset[str]] = frozenset(BOOK_EXTENSIONS)
+# assert len(BOOK_EXTENSIONS_SET) == len(BOOK_EXTENSIONS), "Duplicate book extensions?"
+
 # A comprehensive list of video file extensions.
 VIDEO_EXTENSIONS: Final[tuple[str, ...]] = (
     ".mp4",   ".mkv",   ".mov",   ".avi",    ".mpg",   ".mpeg",
@@ -8072,8 +8141,8 @@ _ARCHIVE_EXTENSIONS_1: tuple[str, ...] = (
     ".tzo",     ".tzst",   ".lzo",   ".lz4",    ".phar",    ".asar",
     ".whl",     ".nupkg",  ".gem",   ".crate",  ".conda",   ".ipa",
     ".cbz",     ".cbr",    ".cb7",   ".kmz",    ".warc",    ".pk3",
-    ".pk4",     ".alz",    ".cpt",   ".ha",     ".sqx",     ".z01",
-    ".r00",     ".001",
+    ".pk4",     ".alz",    ".cpt",   ".ha",     ".sqx",     ".uha",
+    ".z01",     ".r00",    ".001",
 )
 # Technically this list should include .z02... and .r01... and .002...
 _ARCHIVE_EXTENSIONS_2: tuple[str, ...] = tuple(f".z{num:02d}" for num in range(2, 100))
@@ -8091,8 +8160,8 @@ ARCHIVE_EXTENSIONS_SET: Final[frozenset[str]] = frozenset(ARCHIVE_EXTENSIONS)
 
 # Build the combined tuple with first-seen order across categories
 _ALL_CATEGORIES = (
-    PYTHON_EXTENSIONS, HTML_EXTENSIONS, TEXT_EXTENSIONS, SUBTITLE_EXTENSIONS, VIDEO_EXTENSIONS,
-    AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, PLAYLIST_EXTENSIONS, ARCHIVE_EXTENSIONS,
+    PYTHON_EXTENSIONS, HTML_EXTENSIONS,  TEXT_EXTENSIONS,  BOOK_EXTENSIONS,     SUBTITLE_EXTENSIONS,
+    VIDEO_EXTENSIONS,  AUDIO_EXTENSIONS, IMAGE_EXTENSIONS, PLAYLIST_EXTENSIONS, ARCHIVE_EXTENSIONS,
 )
 ALL_KNOWN_EXTENSIONS: Final[tuple[str, ...]] = tuple(
     dict.fromkeys(chain.from_iterable(_ALL_CATEGORIES))
