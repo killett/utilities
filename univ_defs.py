@@ -142,7 +142,7 @@ class LLMConfig:
 
     # Selection knobs
     selection_strategy: SelectionStrategy | str = SelectionStrategy.CHEAPEST
-    min_context_tokens:                     int = 0
+    min_context_tokens:                     int =    0
     assumed_prompt_tokens:                  int = 1000
     assumed_output_tokens:                  int = 1000
 
@@ -150,7 +150,7 @@ class LLMConfig:
     candidate_models:    list[str] = field(default_factory=list)    # if empty -> _default_candidate_models()
 
     # Optional: commonly-used knobs some programs keep near config
-    default_temperature: float = 0.0
+    default_temperature: float =    0.0
     max_tokens:            int = 1000
 
     model_scores: dict[str, float | dict[str, float]] = field(default_factory=dict)
@@ -162,7 +162,7 @@ class LLMConfig:
     max_estimated_cost:     float | None = None   # hard cap per (assumed_in, assumed_out)
 
     # Optional constraints
-    speed_floor:              float | None = None   # minimum steady-state speed (in tokens/sec) (if known)
+    speed_floor:            float | None = None   # minimum steady-state speed (in tokens/sec) (if known)
 
     # --- weights for the composite score (lower = better) ---
     # If a weight remains 0 but a corresponding prefer_* flag is True,
@@ -401,8 +401,6 @@ class LLMs:
 
         ##################################
         # Local (Ollama)
-        # Local models are hardware-dependent; leave None to encourage live measurement:
-        # local models -> measure at runtime
         ##################################
 
         "ollama/qwen2.5-coder:1.5b-base": {
@@ -550,10 +548,8 @@ class LLMs:
 
     _vllm_aliases = ("vllm", "vllm-openai", "vllm_compatible", "vlm")
 
-    # ---------- public lifecycle ----------
     def __init__(self) -> None:
         """Initialize LLMs manager. Call apply_config() before use."""
-        # LiteLLM configuration:
         self._config:                           LLMConfig | None = None
         self._selected:                         ModelInfo | None = None
         self._candidates_after_filter:           list[ModelInfo] = []
@@ -579,7 +575,6 @@ class LLMs:
         """Selected provider name."""
         return self._selected.provider if self._selected else None
 
-    # ---------- config application ----------
     def apply_config(self, config: LLMConfig) -> None:
         """
         Store config, hydrate defaults, compute candidates, select a model.
@@ -655,7 +650,6 @@ class LLMs:
             return LLMConfig()
         return replace(self._config)
 
-    # ---------- strategy registry ----------
     def register_strategy(self, name: str, fn: StrategyFn) -> None:
         """Register a custom strategy for model selection."""
         self._strategies[name] = fn
@@ -776,7 +770,6 @@ class LLMs:
         self._strategies[SelectionStrategy.SMALLEST.value]                 = smallest
         self._strategies["multi_objective"]                                = multi_objective
 
-    # ---------- selection introspection ----------
     def list_candidates(self, with_reasons: bool = False) -> list[ModelInfo]:
         """
         Return the candidate list after filtering (or just the selected if forced local).
@@ -788,7 +781,9 @@ class LLMs:
                 mi.meta.pop("filter_reasons", None)
         return res
 
-    def _selection_pool(self, cfg: LLMConfig) -> tuple[list[ModelInfo], SelectionContext]:
+    def _selection_pool(self, cfg: LLMConfig) -> tuple[list[ModelInfo],
+                                                       SelectionContext,
+                                                       dict[str, list[str]]]:
         """Build the effective candidate pool and SelectionContext for a given config."""
         # Forced-local short-circuit → caller should handle, but keep this as a guard
         if cfg.use_local_model:
@@ -810,7 +805,7 @@ class LLMs:
                 min_context_tokens=cfg.min_context_tokens,
                 require_local=True,
             )
-            return [mi], ctx
+            return [mi], ctx, {mi.name: []}
         raw_candidates = [self._build_model_info(m, cfg) for m in cfg.candidate_models]
         ctx = SelectionContext(
             tokens_in=cfg.assumed_prompt_tokens,
@@ -836,17 +831,30 @@ class LLMs:
         return eff, ctx, reasons_map
 
     def alternative_model(self, *, strategy: SelectionStrategy | str,
-                          return_reasons: bool = False, **cfg_overrides) -> ModelInfo:
+                          return_reasons: bool = False,
+                          **cfg_overrides) -> ModelInfo | tuple[ModelInfo,dict[str, list[str]]]:
         """
         Return the best candidate under a given strategy using a TEMPORARY config
         built from the current config + partial overrides (e.g., use_local_model=True),
         WITHOUT mutating the current selection.
+
+        Args:
+            strategy:        SelectionStrategy enum or string name of a registered strategy.
+            return_reasons:  If True, return a tuple (ModelInfo, reasons_map) where
+                             reasons_map is a dict of model name -> list of filter reasons.
+            **cfg_overrides: Partial overrides to apply to the current config
+                             (e.g., use_local_model=True).
+        
+        Returns:
+            The selected ModelInfo, or (ModelInfo, reasons_map) if return_reasons is True.
+        
+        Raises:
+            ValueError: If the strategy is unknown or if overrides are invalid.
         """
-        from dataclasses import replace as _dc_replace
         base_cfg = self.get_config()  # snapshot of current config (already resolved by apply_config)
         # apply partial overrides
         try:
-            tmp_cfg = _dc_replace(base_cfg, **cfg_overrides)
+            tmp_cfg = replace(base_cfg, **cfg_overrides)
         except TypeError as e:
             raise ValueError(f"Invalid override(s): {e}")
         # Re-resolve in case overrides trigger weight injections, etc.
@@ -915,7 +923,6 @@ class LLMs:
             "considered": considered,
         }
 
-    # ---------- core send method (stable) ----------
     def send_prompt(self, prompt: str, system_message: str,
                     model: str, temperature: float,
                     max_tokens: int = 1000) -> str:
@@ -955,6 +962,7 @@ class LLMs:
     # ====================================================
     # overridable hooks (tiny, intentional)
     # ====================================================
+
     def _default_candidate_models(self) -> list[str]:
         """Return a sane default list combining remote + local names."""
         return list(self.model_info.keys())
@@ -3556,12 +3564,17 @@ def human_bytesize(num: float | int | None, *, suffix: str = "B", si: bool = Fal
     if suffix and not isinstance(suffix, str):
         suffix = str(suffix)
     step = 1000.0 if si else 1024.0
-    symbols = (["", "k", "M", "G", "T", "P", "E", "Z", "Y", "R", "Q"]
-               if si else ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi", "Yi", "Ri", "Qi"])
-    long_prefixes = (["", "kilo", "mega", "giga", "tera", "peta",
-                      "exa", "zetta", "yotta", "ronna", "quetta"]
-                     if si else ["", "kibi", "mebi", "gibi", "tebi",
-                                 "pebi", "exbi", "zebi", "yobi", "robi", "quebi"])
+    # SI prefixes: 10^N, N =  0,   3 ,   6 ,   9 ,  12 ,  15 ,  18 ,  21 ,  24 ,  27 ,  30
+    symbols = ([             "", "k" , "M" , "G" , "T" , "P" , "E" , "Z" , "Y" , "R" , "Q" ]
+               if si else [  "", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi", "Yi", "Ri", "Qi"])
+    # binary prefixes: 2^N, N=0,  10 ,  20 ,  30 ,  40 ,  50 ,  60 ,  70 ,  80 ,  90 ,  100 
+
+
+    long_prefixes = (
+    # 10^N where N = 0,     3 ,     6 ,     9 ,    12 ,    15 ,    18 ,    21  ,     24 ,     27 ,      30
+        [           "", "kilo", "mega", "giga", "tera", "peta", "exa" , "zetta", "yotta", "ronna", "quetta"]
+        if si else ["", "kibi", "mebi", "gibi", "tebi", "pebi", "exbi", "zebi" , "yobi" , "robi" , "quebi" ])
+    # 2^N where N =  0,    10 ,    20 ,    30 ,    40 ,    50 ,    60 ,    70  ,     80 ,     90 ,     100
 
     sign = "-" if num < 0 else ""
     n = abs(float(num))
