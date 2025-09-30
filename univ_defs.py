@@ -162,7 +162,8 @@ class LLMConfig:
     max_estimated_cost:     float | None = None   # hard cap per (assumed_in, assumed_out)
 
     # Optional constraints
-    speed_floor:            float | None = None   # minimum steady-state speed (in tokens/sec) (if known)
+    speed_floor:                   float | None = None  # minimum speed (in tokens/sec) (if known)
+    provider_filter: str | Sequence[str] | None = None  # only use these (e.g., "Anthropic", "OpenAI")
 
     # --- weights for the composite score (lower = better) ---
     # If a weight remains 0 but a corresponding prefer_* flag is True,
@@ -335,17 +336,33 @@ class LLMs:
         # Anthropic
         ##################################
 
-        "claude-3-haiku-20240229": {
+        "claude-3-haiku-20240307": {
             "provider"   : "Anthropic",
-            "context"    : 200_000,  # Anthropic docs & vendor pages [S26,S27]
+            "context"    : 200_000,  # Anthropic docs & launch note (200k at launch) [S60]
             "code_skill" : 0.70,
             "local"      : False,
             "parameters" : _DEFAULT_MODEL_PARAMETERS,
         },
 
-        "claude-3-5-sonnet-20241022": {
+        "claude-3-sonnet-20240229": {
             "provider"   : "Anthropic",
-            "context"    : 200_000,  # [S26,S27]
+            "context"    : 200_000,  # Claude 3 family launched with 200k context [S60]
+            "code_skill" : 0.88,     # balanced capability/perf; below 3 Opus, well above Haiku
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "claude-3-opus-20240229": {
+            "provider"   : "Anthropic",
+            "context"    : 200_000,  # Claude 3 family launched with 200k context [S60]
+            "code_skill" : 0.91,     # strong reasoning/coding; below Claude 4 era, above 3 Sonnet
+            "local"      : False,
+            "parameters" : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "claude-3-5-sonnet-20240620": {
+            "provider"   : "Anthropic",
+            "context"    : 200_000,  # GA with 200k; launch & cloud listings [S61,S62]
             "code_skill" : 0.92,
             "local"      : False,
             "parameters" : _DEFAULT_MODEL_PARAMETERS,
@@ -356,10 +373,46 @@ class LLMs:
             "context"       : 200_000,  # [S21,S26,S27] (Sonnet 4 has 1M, not 3.7) [S20]
             "code_skill"    : 0.93,     # leads/near-top on SWE-bench Verified [S13,S16]
             "general_skill" : 0.90,     # hybrid reasoning; strong OSWorld & agentic [S16]
-            "TTFT"          : 1.16,     # ~1.16s avg; reports of ~0.2s for quick replies (varies) [S36]
+            "TTFT"          : 1.16,     # launch + AA metrics [S16,S36]
             "speed"         : 65.5,     # AA [S36]
             "local"         : False,
-            "parameters"    : 123E9,
+            "parameters"    : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "claude-sonnet-4-20250514": {
+            "provider"      : "Anthropic",
+            "context"       : 1_000_000,  # Sonnet 4 supports 1M (Aug 12, 2025) [S50]
+            "code_skill"    : 0.94,       # strong coding & reasoning; successor to 3.7 Sonnet [S52,S53]
+            "general_skill" : 0.91,
+            "local"         : False,
+            "parameters"    : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "claude-opus-4-20250514": {
+            "provider"      : "Anthropic",
+            "context"       : 200_000,  # Opus 4 default 200k ctx (launch) [S52,S55]
+            "code_skill"    : 0.95,     # frontier coding/agents positioning at launch [S52,S55]
+            "general_skill" : 0.94,
+            "local"         : False,
+            "parameters"    : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "claude-opus-4-1-20250805": {
+            "provider"      : "Anthropic",
+            "context"       : 200_000,  # Opus 4.1 docs & Bedrock pages list 200k ctx [S49,S56]
+            "code_skill"    : 0.95,     # upgrade vs Opus 4 on agentic coding & reasoning [S49]
+            "general_skill" : 0.94,
+            "local"         : False,
+            "parameters"    : _DEFAULT_MODEL_PARAMETERS,
+        },
+
+        "claude-sonnet-4-5-20250929": {
+            "provider"      : "Anthropic",
+            "context"       : 1_000_000,  # 1M context variant referenced; models overview [S47,S50]
+            "code_skill"    : 0.95,       # SOTA on SWE-bench Verified; 30+ hr autonomous runs [S47]; strong agentic + computer-use gains [S58,S59]
+            "general_skill" : 0.94,
+            "local"         : False,
+            "parameters"    : _DEFAULT_MODEL_PARAMETERS,
         },
 
         ##################################
@@ -538,6 +591,23 @@ class LLMs:
     # S44 - Mistral 7B announcement — qualitative coding claim "approaches CodeLlama 7B performance on code" - https://mistral.ai/news/announcing-mistral-7b
     # S45 - Meta Llama 3.1 8B Instruct model card — instruction-tuned benchmarks incl. MMLU 69.4, HumanEval 72.6, MBPP++ 72.8 - https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
     # S46 - Llama 3.1 8B Instruct eval details dataset — per-task results backing the model card table - https://huggingface.co/datasets/meta-llama/Llama-3.1-8B-Instruct-evals
+    # S47 — Anthropic: Introducing Claude Sonnet 4.5 — https://www.anthropic.com/news/claude-sonnet-4-5
+    # S48 — Anthropic: Claude 3.5 Haiku page (availability/pricing) — https://www.anthropic.com/claude/haiku
+    # S49 — Anthropic News: Claude Opus 4.1 — https://www.anthropic.com/news/claude-opus-4-1
+    # S50 — Claude Docs: Models overview (Sonnet 4 & 4.5 1M context header) — https://docs.claude.com/en/docs/about-claude/models/overview
+    # S51 — Google Vertex AI: Claude Sonnet 4 (release date) — https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude/sonnet-4
+    # S52 — Anthropic: Introducing Claude 4 (Opus 4 & Sonnet 4 launch) — https://www.anthropic.com/news/claude-4
+    # S53 — OpenRouter: Claude Sonnet 4 (capabilities & benchmarks) — https://openrouter.ai/anthropic/claude-sonnet-4
+    # S54 — Google Vertex AI: Claude 3.5 Haiku (release date listing) — https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude/haiku-3-5
+    # S55 — AWS Blog: Introducing Claude 4 in Amazon Bedrock (200k ctx) — https://aws.amazon.com/blogs/aws/claude-opus-4-anthropics-most-powerful-model-for-coding-is-now-in-amazon-bedrock/
+    # S56 — AWS Bedrock model page: Anthropic (Opus 4.1, 200k ctx) — https://aws.amazon.com/bedrock/anthropic/
+    # S57 — AWS Blog: Claude Sonnet 4.5 in Amazon Bedrock — https://aws.amazon.com/blogs/aws/introducing-claude-sonnet-4-5-in-amazon-bedrock-anthropics-most-intelligent-model-best-for-coding-and-complex-agents/
+    # S58 — The Verge: Anthropic releases Claude Sonnet 4.5 (30-hour agents, coding) — https://www.theverge.com/ai-artificial-intelligence/787524/anthropic-releases-claude-sonnet-4-5-in-latest-bid-for-ai-agents-and-coding-supremacy
+    # S59 — Reuters: Anthropic launches Claude 4.5 (enterprise focus; 30-hour autonomy) — https://www.reuters.com/business/retail-consumer/anthropic-launches-claude-45-touts-better-abilities-targets-business-customers-2025-09-29/
+    # S60 — Anthropic: Claude 3 family launch (200k context at launch) — https://www.anthropic.com/news/claude-3-family
+    # S61 — Anthropic: Claude 3.5 Sonnet announcement (Jun 21, 2024) — https://www.anthropic.com/news/claude-3-5-sonnet
+    # S62 — Google Cloud Blog: Claude 3.5 Sonnet on Vertex AI (Jun 20, 2024) — https://cloud.google.com/blog/products/ai-machine-learning/announcing-anthropics-claude-3-5-sonnet-on-vertex-ai-providing-more-choice-for-enterprises
+
 
     # Provider -> required env var
     _provider_env: dict[str, str] = {
@@ -551,6 +621,9 @@ class LLMs:
     def __init__(self) -> None:
         """Initialize LLMs manager. Call apply_config() before use."""
         self._config:                           LLMConfig | None = None
+        self._base_config:                      LLMConfig | None = None  # re-apply after failure/reconnect
+        self._temp_unavailable_models:                  set[str] = set() # transient banlist after failures
+        self._temp_unavailable_providers:               set[str] = set()
         self._selected:                         ModelInfo | None = None
         self._candidates_after_filter:           list[ModelInfo] = []
         self._strategies:                  dict[str, StrategyFn] = {}
@@ -579,8 +652,10 @@ class LLMs:
         """
         Store config, hydrate defaults, compute candidates, select a model.
         """
-        cfg = self._resolve_config(config)
-        self._config = cfg
+        # Keep the user-provided config so we can re-apply it later on failure
+        self._base_config = replace(config)
+        cfg               = self._resolve_config(config)
+        self._config      = cfg
 
         if cfg.use_local_model:
             entry = self.model_info.get(cfg.local_model_name, {})
@@ -815,6 +890,7 @@ class LLMs:
         )
         filtered, reasons_map = self._filter_candidates(raw_candidates, ctx)
         eff = filtered if filtered else raw_candidates
+        eff = filtered  # do not fall back to raw_candidates; respect temporary bans
         if cfg.max_estimated_cost is not None:
             tmp = [m for m in eff if m.estimate_cost(cfg.assumed_prompt_tokens, cfg.assumed_output_tokens) <= cfg.max_estimated_cost]
             if tmp:
@@ -906,19 +982,20 @@ class LLMs:
                                                     cfg.assumed_output_tokens),
             "strategy"       : getattr(self, "_last_strategy", str(cfg.selection_strategy)),
             "weights"        : {
-                "price"                  : cfg.weight_price,
-                "code_skill"             : cfg.weight_code_skill,
-                "general_skill"          : cfg.weight_general_skill,
-                "TTFT"                   : cfg.weight_TTFT,
-                "speed"                  : cfg.weight_speed,
-                "nonlocal_penalty"       : cfg.weight_nonlocal_penalty,
+                "price"              : cfg.weight_price,
+                "code_skill"         : cfg.weight_code_skill,
+                "general_skill"      : cfg.weight_general_skill,
+                "TTFT"               : cfg.weight_TTFT,
+                "speed"              : cfg.weight_speed,
+                "nonlocal_penalty"   : cfg.weight_nonlocal_penalty,
             },
             "prefs": {
-                "prefer_code"            : cfg.prefer_code,
-                "prefer_low_TTFT"        : cfg.prefer_low_TTFT,
-                "prefer_local"           : cfg.prefer_local,
-                "max_estimated_cost"     : cfg.max_estimated_cost,
-                "speed_floor"            : cfg.speed_floor,
+                "prefer_code"        : cfg.prefer_code,
+                "prefer_low_TTFT"    : cfg.prefer_low_TTFT,
+                "prefer_local"       : cfg.prefer_local,
+                "max_estimated_cost" : cfg.max_estimated_cost,
+                "speed_floor"        : cfg.speed_floor,
+                "provider_filter"    : cfg.provider_filter,
             },
             "considered": considered,
         }
@@ -943,20 +1020,116 @@ class LLMs:
             RuntimeError: If the model is unknown or if the request fails.
             ValueError:   If the prompt is empty.
         """
+        if prompt is None:
+            raise ValueError("prompt must not be None")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("prompt must be a non-empty string")
+
+        # Ensure LiteLLM and prepare common kwargs
         self._ensure_litellm()
         litellm = self._litellm_mod  # type: ignore
-        extra   = self._extra_litellm_args_for(model)
+        messages=[{"role": "system", "content": system_message},
+                  {"role": "user",   "content": prompt}]
+        extra = self._extra_litellm_args_for(model)
+
+        # ---- Preflight: context-window warning (best-effort; never blocks the call) ----
         try:
-            resp = litellm.completion(
-                model=model,
-                messages=[{"role": "system", "content": system_message},
-                          {"role": "user",   "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **extra
-            )
+            _, _, context_window = self._get_model_pricing_and_context(model)
+            if context_window:
+                input_tokens = self._count_chat_tokens(messages, model)
+                if input_tokens + max_tokens > context_window:
+                    logging.warning(
+                        "send_prompt: estimated tokens exceed context for %s: %d (in) + %d (out) > %d (ctx). "
+                        "Response may truncate or fail.",
+                        model, input_tokens, max_tokens, context_window
+                    )
+        except Exception:
+            # Never fail the request just because counting or lookup had an issue
+            pass
+
+        # ---- Invoke LiteLLM (prefer retries when available) ----
+        kwargs = dict(model=model,
+                      messages=messages,
+                      temperature=temperature,
+                      max_tokens=max_tokens,
+                      **extra)
+        try:
+            comp_with_retries = getattr(litellm, "completion_with_retries", None)
+            if callable(comp_with_retries):
+                resp = comp_with_retries(max_retries=2, **kwargs)
+            else:
+                resp = litellm.completion(**kwargs)
+            try:
+                self._temp_unavailable_models.clear()
+                self._temp_unavailable_providers.clear()
+            except Exception as e:
+                logging.warning("Could not clear temporary banlists: %s", e)
+                pass
         except Exception as e:
-            my_critical_error(f"LiteLLM request failed for model '{model}': {e}")
+            # Mark the current model as temporarily unavailable for re-selection
+            try:
+                self._temp_unavailable_models.add(model)
+                prov = (self.model_info.get(model, {}) or {}).get("provider")
+                # Only ban the provider if it looks like a provider-wide issue
+                if isinstance(prov, str) and prov and self._should_ban_provider_for(e):
+                    self._temp_unavailable_providers.add(prov)
+            except Exception as e:
+                logging.warning("Could not update temporary banlists: %s", e)
+            # ---- Iterative failover: try the next best candidates under the same strategy ----
+            base_cfg = self._base_config or self.get_config()
+            last_exc = e
+            tried_models: set[str] = {model}
+            # A small upper bound so we don't loop forever; we’ll stop early if we run out.
+            max_attempts = 5
+            for _ in range(max_attempts):
+                try:
+                    # Recompute selection with current temp bans
+                    self.apply_config(base_cfg)
+                    failover_model = self.model or model
+                    # If selection returns a model we've already tried (can happen if all others are banned),
+                    # try an alternative directly via the same strategy.
+                    if failover_model in tried_models:
+                        try:
+                            alt = self.alternative_model(strategy=self._last_strategy)
+                            failover_model = alt.name
+                        except Exception:
+                            # Could not find an alternative; we will bail out below
+                            raise
+                    tried_models.add(failover_model)
+                    # Rebuild transport extras for the new model
+                    extra2  = self._extra_litellm_args_for(failover_model)
+                    kwargs2 = dict(model=failover_model,
+                                   messages=messages,
+                                   temperature=temperature,
+                                   max_tokens=max_tokens,
+                                   **extra2)
+                    comp_with_retries = getattr(litellm, "completion_with_retries", None)
+                    if callable(comp_with_retries):
+                        resp = comp_with_retries(max_retries=2, **kwargs2)
+                    else:
+                        resp = litellm.completion(**kwargs2)
+                    # Success: clear banlists so future selections aren't biased forever
+                    try:
+                        self._temp_unavailable_models.clear()
+                        self._temp_unavailable_providers.clear()
+                    except Exception as e:
+                        logging.warning("Could not clear temporary banlists: %s", e)
+                except Exception as e2:
+                    # Ban just the model on each iterative failure; provider-ban only if broad issue.
+                    last_exc = e2
+                    try:
+                        self._temp_unavailable_models.add(failover_model)
+                        prov2 = (self.model_info.get(failover_model, {}) or {}).get("provider")
+                        if isinstance(prov2, str) and prov2 and self._should_ban_provider_for(e2):
+                            self._temp_unavailable_providers.add(prov2)
+                    except Exception as e:
+                        logging.warning("Could not update temporary banlists: %s", e)
+                    # Continue loop to try the next best candidate
+            # All failovers exhausted → surface both the original and the last failure
+            my_critical_error(
+                f"LiteLLM request failed for model '{model}' and iterative failover also failed. "
+                f"original_error={e}; last_error={last_exc}"
+            )
         return self._extract_text_from_openai_like(resp)
 
     # ====================================================
@@ -994,10 +1167,23 @@ class LLMs:
 
     def _resolve_config(self, config: LLMConfig) -> LLMConfig:
         """Hydrate defaults: candidates, scores (with env JSON merge)."""
+        try:
+            if not config.use_local_model and not is_internet_available():
+                logging.warning("Internet not available; forcing use_local_model=True")
+                config = replace(config, use_local_model=True)
+        except Exception as e:
+            # Never fail just because connectivity check had an issue
+            logging.warning("Ignoring the fact that the internet connectivity check failed: %s", e)
+            pass
         # Candidate models
         cands = list(config.candidate_models) if config.candidate_models else self._default_candidate_models()
         if not config.allow_local_models:
             cands = [m for m in cands if not self.model_info.get(m, {}).get("local", False)]
+
+        # Provider filter (accepts str or sequence of str) ---
+        if config.provider_filter:
+            allowed = {config.provider_filter} if isinstance(config.provider_filter, str) else set(config.provider_filter)
+            cands = [m for m in cands if self.model_info.get(m, {}).get("provider") in allowed]
 
         # Merge env JSON (if present) into cfg.model_scores; allow both float and {'code','general'} forms
         scores        = dict(config.model_scores)  # copy
@@ -1031,7 +1217,7 @@ class LLMs:
     def _filter_candidates(self, candidates: list[ModelInfo],
                            ctx: SelectionContext) -> tuple[list[ModelInfo], dict[str, list[str]]]:
         """Filter by availability, context, and optional locality. Return filtered list and reasons per model name."""
-        filtered: list[ModelInfo] = []
+        filtered:     list[ModelInfo] = []
         reasons: dict[str, list[str]] = {}
         for mi in candidates:
             r: list[str] = []
@@ -1041,6 +1227,10 @@ class LLMs:
                 r.append(f"context_too_small({mi.context_window}<{ctx.min_context_tokens})")
             if ctx.require_local and not mi.is_local:
                 r.append("requires_local")
+            if mi.name in getattr(self, "_temp_unavailable_models", set()):
+                r.append("temporarily_unavailable(model)")
+            if mi.provider in getattr(self, "_temp_unavailable_providers", set()):
+                r.append("temporarily_unavailable(provider)")
             if r:
                 reasons[mi.name] = r
             else:
@@ -1074,7 +1264,7 @@ class LLMs:
                 for m in models:
                     name = (m.get("name") or m.get("model"))
                     if isinstance(name, str):
-                        installed.add(name.strip().lower())
+                        installed.add(name.strip().casefold())
 
                 # Derive the tag from the registry key (no extra fields required)
                 target = self._derive_ollama_tag(model, runtime)
@@ -1151,6 +1341,32 @@ class LLMs:
         except ImportError as e:
             my_critical_error(f"LiteLLM is enabled but not installed. 'pip install litellm' Error: {e}")
 
+    def _should_ban_provider_for(self, exc: Exception) -> bool:
+        """
+        Return True only for likely provider-wide issues. We avoid banning the provider
+        for BadRequest/unknown-model style errors so a single bad alias doesn't knock out
+        the whole vendor.
+        """
+        msg = str(exc).casefold()
+        # Heuristics for "broad" provider problems
+        provider_wide_hints = (
+            "rate limit", "ratelimit", "too many requests",
+            "service unavailable", "temporarily unavailable",
+            "overloaded", "timeout", "timed out",
+            "connection error", "api connection", "dns",
+            "authentication error", "invalid api key", "unauthorized"
+        )
+        # Heuristics for "bad request / model not found" -> DO NOT provider-ban
+        model_only_hints = (
+            "llm provider not provided",    # LiteLLM unknown model/provider mapping
+            "invalid request", "bad request",
+            "unknown model", "model not found",
+            "unsupported model", "unrecognized model"
+        )
+        if any(h in msg for h in model_only_hints):
+            return False
+        return any(h in msg for h in provider_wide_hints)
+
     def _http_get_json(self, url: str, timeout: float = 2.0) -> dict[str, Any] | None:
         """Helper to GET a URL and parse JSON, returning None on any failure."""
         from urllib import request, error
@@ -1178,7 +1394,7 @@ class LLMs:
         tag = model
         if model.startswith("ollama/"):
             tag = model[len("ollama/") :]
-        return tag.strip().lower() if r == "ollama" else ""
+        return tag.strip().casefold() if r == "ollama" else ""
 
     # Pricing/context helpers with caching
 
@@ -1308,6 +1524,54 @@ class LLMs:
             return float(v) if v is not None else None
         return None
 
+    def _count_chat_tokens(self, messages: list[dict[str, Any]], model: str) -> int:
+        """
+        Return token count for a chat payload.
+        Prefers litellm.token_counter(messages=...) to include role/markup overhead,
+        otherwise falls back to self.tokenize() on joined text with a tiny overhead.
+        """
+        # 1) Prefer litellm's chat-aware counter
+        try:
+            import importlib
+            litellm = getattr(self, "_litellm_mod", None) or importlib.import_module("litellm")  # type: ignore
+            token_counter = getattr(litellm, "token_counter", None)
+            if callable(token_counter):
+                res = token_counter(model=model, messages=messages)
+                if isinstance(res, dict):
+                    for k in ("input_tokens", "total_tokens", "num_tokens"):
+                        v = res.get(k)
+                        if isinstance(v, (int, float)):
+                            return int(v)
+                elif isinstance(res, int):
+                    return int(res)
+        except Exception:
+            pass
+
+        # 2) Fallback: join textual parts and use self.tokenize()
+        chunks: list[str] = []
+        for m in messages:
+            c = m.get("content")
+            if isinstance(c, str):
+                chunks.append(c)
+            elif isinstance(c, list):
+                # e.g., Anthropic-style [{"type":"text","text": "..."}]
+                for part in c:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        t = part.get("text")
+                        if isinstance(t, str):
+                            chunks.append(t)
+        text = "\n".join(chunks)
+        tokens = self.tokenize(text, model)
+
+        # 3) Tiny overhead heuristic for chat separators (mostly OpenAI-style ChatML)
+        try:
+            provider = (self.model_info.get(model, {}).get("provider") or "").strip()
+            if provider == "OpenAI":
+                tokens += 4 * len(messages) + 2
+        except Exception:
+            pass
+        return int(tokens)
+
     def tokenize(self, text: str, model: str | None = None) -> int:
         """
         Return the number of tokens in 'text' under the tokenizer best-suited to 'model'.
@@ -1403,7 +1667,7 @@ class LLMs:
             import tiktoken  # type: ignore
 
             enc_name = "cl100k_base"
-            m = model.lower()
+            m = model.casefold()
 
             # Use o200k_base for OpenAI's o*/4o/4.1/5 families (long-context tokenization)
             if provider == "OpenAI" or m.startswith(("gpt", "o")):
@@ -2541,14 +2805,14 @@ def _looks_like_captive(status: int | None, final_url: str | None, body: bytes |
         return True
     if status in (301, 302, 303, 307, 308):
         return True
-    b = (body or b"")[:256].lower()
+    b = (body or b"")[:256].casefold()
     if status == 204 and b:
         return True
     if status == 200 and b:
         if b"<html" in b or b"login" in b or b"captive" in b or b"portal" in b:
             return True
     if final_url:
-        fu = final_url.lower()
+        fu = final_url.casefold()
         if any(k in fu for k in ("login", "captive", "portal", "hotspot", "walledgarden")):
             return True
     return False
@@ -2803,7 +3067,8 @@ def is_internet_available(timeout_per_step: float = 2.5,
         if attempt < attempts:
             import time
             import random  # Jitter retries slightly.
-            delay: float = 0.10 + 0.05 * attempt + random.uniform(0.0, 0.05)
+            tiny_t: float = 0.05  # seconds
+            delay:  float = 2*tiny_t + tiny_t * attempt + random.uniform(0.0, tiny_t)
             time.sleep(delay)
     return False
 
