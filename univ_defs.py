@@ -8,11 +8,12 @@ from pathlib import Path  # Preferred over os.path for path manipulations.
 import logging
 from collections.abc import Sequence, Callable, Iterable
 from itertools import chain
-from typing import TextIO, Any, TypeAlias, Type, Literal, Protocol, Final
+from typing import TextIO, Any, TypeAlias, Type, Literal, Final
 import re  # Used to precompile regexes for performance
 from dataclasses import dataclass, field, replace
 from enum import Enum
 import errno
+from concurrent.futures import ThreadPoolExecutor
 
 # Version of univ_defs.py:
 __version__: Final[str] = "0.2.1"
@@ -22,7 +23,10 @@ __version__: Final[str] = "0.2.1"
 # The next version (Python 3.13) will leave the bugfix phase around 2026-10.
 PY_VERSION: Final[float] = 3.12
 
-NASA_COMPUTER_NAME_PREFIX: Final[str] = "RAYL"  # Computers with names starting with this prefix are at NASA and can only use "cleared" LLMs.
+# Further down, this COMPUTER_NAME is obtained by calling get_computer_name(). 
+# Then IS_NASA_COMPUTER is set based on whether COMPUTER_NAME starts with any of NASA_COMPUTER_NAME_PREFIXES.
+# JPL computers often have names starting with "MT" which stands for "ManTech"
+NASA_COMPUTER_NAME_PREFIXES: Final[tuple[str, ...]] = ("RAYL", "NASA", "JPL", "MT")  # NASA computers start with these prefixes and can only use "cleared" LLMs.
 
 # Default encoding used for reading and writing text files:
 DEFAULT_ENCODING: str = "utf-8"
@@ -126,7 +130,7 @@ class MemoryHandler(logging.Handler):
     def __init__(self, level: int = logging.ERROR) -> None:
         """Initialize the MemoryHandler with the specified logging level."""
         super().__init__(level)
-        self.logs = []
+        self.logs: list[str] = []
 
     def emit(self, record: logging.LogRecord) -> None:
         """Capture the log record and store it in memory."""
@@ -176,8 +180,22 @@ def fallback_logging_config(log_level: int | str = logging.INFO, rawlog: bool = 
 
 
 def configure_logging(basename: str, log_level: int | str = logging.INFO,
-                      rawlog: bool = False, logdir: str | os.PathLike[str] = "") -> MemoryHandler:
-    """Configure logging to write to files and stdout/stderr, and return a MemoryHandler to capture ERROR logs for later (duplicate) printing."""
+                      rawlog: bool = False, logdir: str | os.PathLike[str] = "") -> MemoryHandler | None:
+    """
+    Configure logging to write to files and stdout/stderr, and return a MemoryHandler to capture ERROR logs for later (duplicate) printing.
+    
+    Args:
+        basename : Base name for the log files.
+        log_level: Logging level (default: logging.INFO).
+        rawlog   : If True, use a simple log format without timestamps or levels.
+        logdir   : Directory to store log files. Defaults to './logs'.
+
+    Returns:
+        MemoryHandler instance capturing ERROR logs, or None if log files couldn't be created.
+    
+    Raises:
+        None (file creation errors are caught and logged to stdout).
+    """
     import datetime as dt
 
     root_logger = logging.getLogger()
@@ -300,7 +318,7 @@ def my_popen(command_list: list, suppress_info: bool = False,
     if not suppress_info:
         logging.info(the_statement)
     else:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(the_statement)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(the_statement)
 
     try:
         process = subprocess.Popen(
@@ -316,16 +334,20 @@ def my_popen(command_list: list, suppress_info: bool = False,
 
         def read_stdout() -> None:
             """Read stdout line by line and log it."""
+            if process.stdout is None:
+                return
             for line in process.stdout:
                 stdout_lines.append(line)
                 log_line = line.strip()
                 if not suppress_info:
                     logging.info(log_line)
                 else:
-                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(log_line)
+                    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(log_line)
 
         def read_stderr() -> None:
             """Read stderr line by line and log it."""
+            if process.stderr is None:
+                return
             for line in process.stderr:
                 stderr_lines.append(line)
                 log_line = line.strip()
@@ -334,7 +356,7 @@ def my_popen(command_list: list, suppress_info: bool = False,
                 elif not suppress_info:
                     logging.info(log_line)
                 else:
-                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(log_line)
+                    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(log_line)
 
         # Start threads
         stdout_thread = threading.Thread(target=read_stdout)
@@ -447,7 +469,7 @@ def my_fopen(file_path: str | os.PathLike[str],
                     file_content = file.read()
                 else:
                     file_content = "".join(file.readline() for _ in range(numlines))
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Successfully read %s with encoding %s", os.fspath(file_path), encoding)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Successfully read %s with encoding %s", os.fspath(file_path), encoding)
             return file_content  # Exit the function if reading is successful
         except UnicodeDecodeError:
             if verbose and not rawlog:
@@ -518,13 +540,13 @@ def return_method_name(levels_up: int = 1) -> str:
                     fr = fr.f_back
                     climbed += 1
                 if climbed < levels:
-                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("return_method_name(): truncated at top of stack (requested levels_up=%s but only climbed=%s)", levels, climbed)
+                    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("return_method_name(): truncated at top of stack (requested levels_up=%s but only climbed=%s)", levels, climbed)
             finally:
                 if frame is not None:
                     try:
                         frame.clear()
                     except Exception as e:
-                        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                             "Failed to clear frame: %s", e
                         )
                     del frame
@@ -711,7 +733,9 @@ def analyze_computer_name_results(results: dict[str, str], rawlog: bool = False)
         return primary_name
 
 
-_IS_NASA_MACHINE = get_computer_name(rawlog=True).casefold().startswith(NASA_COMPUTER_NAME_PREFIX.casefold())
+COMPUTER_NAME: str = get_computer_name(rawlog=True)
+NASA_CASEFOLDED_COMPUTER_NAME_PREFIXES: Final[tuple[str, ...]] = tuple(p.casefold() for p in NASA_COMPUTER_NAME_PREFIXES)
+IS_NASA_COMPUTER: bool = COMPUTER_NAME.casefold().startswith(NASA_CASEFOLDED_COMPUTER_NAME_PREFIXES)
 
 
 class SelectionStrategy(str, Enum):
@@ -730,7 +754,7 @@ class LLMConfig:
     """Configuration for LLM selection and usage. Data only."""
     # Routing / engines
     # If only_cleared_models is True, only use a model that has been "cleared" for use at NASA on open-source code.
-    only_cleared_models:    bool = _IS_NASA_MACHINE
+    only_cleared_models:    bool = IS_NASA_COMPUTER
     only_local_models:      bool = False
     allow_local_models:     bool = True
 
@@ -831,13 +855,12 @@ class SelectionContext:
     tokens_out:         int
     min_context_tokens: int
     require_local:     bool = False
-    require_cleared:   bool = _IS_NASA_MACHINE
+    require_cleared:   bool = IS_NASA_COMPUTER
     extras:  dict[str, Any] = field(default_factory=dict)
 
 
-class StrategyFn(Protocol):
-    """Strategy function interface."""
-    def __call__(self, candidates: Sequence[ModelInfo], ctx: SelectionContext) -> ModelInfo: ...
+# Type alias: any function that takes (candidates: Sequence[ModelInfo], ctx: SelectionContext) and returns a ModelInfo.
+StrategyFn: TypeAlias = Callable[[Sequence[ModelInfo], SelectionContext], ModelInfo]
 
 
 class LLMs:
@@ -1442,7 +1465,7 @@ class LLMs:
     def refresh_selection(self) -> None:
         """Re-run selection using the current LLMConfig."""
         if self._config is None:
-            my_critical_error("refresh_selection() called before apply_config().")
+            raise RuntimeError("refresh_selection() called before apply_config().")
         self.apply_config(self._config)
 
     def get_config(self) -> LLMConfig:
@@ -1622,9 +1645,7 @@ class LLMs:
             if tmp:
                 eff = tmp
         if not eff:
-            sample_list = list(reasons_map.items())
-            smallnum    = min(5, len(sample_list))
-            sample      = dict(sample_list[:smallnum])
+            sample = dict(list(reasons_map.items())[:5])
             raise RuntimeError(
                 "No candidates available after filtering. "
                 f"candidates={len(raw_candidates)}; reasons_sample={sample}. "
@@ -1933,7 +1954,7 @@ class LLMs:
 
     def _after_selection(self, model: str, provider: str) -> None:
         """Optional hook for telemetry/logging; default no-op."""
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Selected model %s (%s)", model, provider)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Selected model %s (%s)", model, provider)
 
     # ====================================================
     # internals
@@ -2062,7 +2083,7 @@ class LLMs:
                     # If we got a dict back without raising, consider it OK
                     ok = isinstance(md, dict)
                 except Exception as e:
-                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("availability probe (get_model_info) failed for %s/%s: %s", provider, model, e)
+                    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("availability probe (get_model_info) failed for %s/%s: %s", provider, model, e)
             # 2) Minimal completion (last resort). Guard with tiny timeout & 1 token.
             if not ok and (getattr(cfg, "availability_probe_allow_costly", False) is True):
                 try:
@@ -2089,9 +2110,9 @@ class LLMs:
                         litellm.completion(**kwargs)
                     ok = True
                 except Exception as e:
-                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("availability probe (1-token completion) failed for %s/%s: %s", provider, model, e)
+                    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("availability probe (1-token completion) failed for %s/%s: %s", provider, model, e)
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("availability probe setup failed for %s/%s: %s", provider, model, e)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("availability probe setup failed for %s/%s: %s", provider, model, e)
             ok = False
         self._availability_cache[key] = (ok, now)
         return ok
@@ -2156,7 +2177,7 @@ class LLMs:
             if not self._probe_provider_available(provider, model):
                 return False
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Ignoring availability probe failure for %s/%s: %s", provider, model, e)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Ignoring availability probe failure for %s/%s: %s", provider, model, e)
             # Fail-open to avoid blocking selection entirely on probe hiccups
         return True
 
@@ -2287,7 +2308,7 @@ class LLMs:
         try:
             inp = int(self._count_chat_tokens(messages, model))
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_count_chat_tokens(messages, model) failed for %s, %s: %s", messages, model, e
             )
             inp = 0
@@ -2424,13 +2445,13 @@ class LLMs:
             )
             cur.execute("COMMIT")
         except Exception as e1:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_throttle_if_needed failed for %s/%s: %s", provider, model, e1
             )
             try:
                 cur.execute("ROLLBACK")
             except Exception as e2:
-                logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                     "_throttle_if_needed ROLLBACK failed for %s/%s: %s", provider, model, e2
                 )
             # fail-open on throttle store problems
@@ -2453,7 +2474,7 @@ class LLMs:
             import json
             return json.loads(raw.decode(DEFAULT_ENCODING))
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_http_get_json: JSON parse failed for %s: %s", url, e
             )
             return None
@@ -2505,7 +2526,7 @@ class LLMs:
                 try:
                     md = info_fn(model) or {}
                 except Exception as e:
-                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                         "LiteLLM get_model_info(%s) failed: %s", model, e
                     )
                     md = {}
@@ -2520,7 +2541,7 @@ class LLMs:
                 try:
                     context = int(max_ctx)
                 except Exception as e:
-                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                         "_get_model_pricing_and_context: context extraction failed for %s: %s", model, e
                     )
 
@@ -2545,7 +2566,7 @@ class LLMs:
                             out_cost = float(row["output_cost_per_1k_tokens"]) / 1000.0
 
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "LiteLLM pricing/context lookup failed for %s: %s", model, e
             )
 
@@ -2574,34 +2595,34 @@ class LLMs:
         try:
             return resp.choices[0].message.content  # type: ignore[attr-defined]
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_extract_text_from_openai_like: pydantic-like extraction failed for %s: %s", resp, e
             )
         # dict-like
         try:
             return resp["choices"][0]["message"]["content"]  # type: ignore[index]
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_extract_text_from_openai_like: dict-like extraction failed for %s: %s", resp, e
             )
         # object-like with dict message
         try:
             return resp.choices[0].message["content"]  # type: ignore[index]
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_extract_text_from_openai_like: object-like extraction failed for %s: %s", resp, e
             )
         # completion-style (no chat message wrapper)
         try:
             return resp["choices"][0]["text"]  # type: ignore[index]
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_extract_text_from_openai_like: completion-style extraction failed for %s: %s", resp, e
             )
         try:
             return resp.choices[0].text  # type: ignore[attr-defined]
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_extract_text_from_openai_like: completion-style extraction failed for %s: %s", resp, e
             )
         # Anthropic / segment-style lists
@@ -2618,7 +2639,7 @@ class LLMs:
                 if parts:
                     return "".join(parts)
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_extract_text_from_openai_like: segment-style extraction failed for %s: %s", resp, e
             )
         # delta fragments (best-effort)
@@ -2630,7 +2651,7 @@ class LLMs:
                 if "text" in d and isinstance(d["text"], str):
                     return d["text"]
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_extract_text_from_openai_like: delta extraction failed for %s: %s", resp, e
             )
         # As last resort, stringify
@@ -2674,7 +2695,7 @@ class LLMs:
                 elif isinstance(res, int):
                     return int(res)
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_count_chat_tokens: litellm.token_counter failed for %s: %s", model, e
             )
 
@@ -2700,7 +2721,7 @@ class LLMs:
             if isinstance(provider, str) and provider.strip() == "OpenAI":
                  tokens += 4 * len(messages) + 2
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_count_chat_tokens: tiny overhead heuristic failed for %s: %s", model, e
             )
         return int(tokens)
@@ -2756,7 +2777,7 @@ class LLMs:
                     if isinstance(toks, list):
                         return len(toks)
                 except Exception as e:
-                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                         "_count_chat_tokens: local ollama tokenizer failed for %s: %s", model, e
                     )
                     # fall through to other methods
@@ -2772,7 +2793,7 @@ class LLMs:
                 try:
                     return int(get_num_tokens(model=model, text=text))
                 except Exception as e:
-                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                         "_count_chat_tokens: litellm.get_num_tokens failed for %s: %s", model, e
                     )
 
@@ -2785,7 +2806,7 @@ class LLMs:
                     if isinstance(out, int):
                         return int(out)
                 except Exception as e:
-                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                         "_count_chat_tokens: litellm.token_counter (raw text) failed for %s: %s", model, e
                     )
                 # Others want chat messages, returning a dict
@@ -2797,11 +2818,11 @@ class LLMs:
                             if isinstance(v, (int, float)):
                                 return int(v)
                 except Exception as e:
-                    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                         "_count_chat_tokens: litellm.token_counter (chat messages) failed for %s: %s", model, e
                     )
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "_count_chat_tokens: litellm.token_counter failed for %s: %s", model, e
             )
 
@@ -2820,7 +2841,7 @@ class LLMs:
             try:
                 enc = tiktoken.get_encoding(enc_name)
             except Exception as e:
-                logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                     "tiktoken.get_encoding(%s) failed for %s: %s", enc_name, model, e
                 )
                 # fallback to cl100k_base if the preferred encoding is unavailable
@@ -2828,7 +2849,7 @@ class LLMs:
 
             return len(enc.encode(text))
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "tiktoken-based tokenization failed for %s: %s", model, e
             )
 
@@ -2946,7 +2967,7 @@ def _builtin_stub(obj: object) -> str:
     try:
         sig = str(inspect.signature(obj))
     except Exception as e:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "_builtin_stub: inspect.signature failed for %s: %s", def_name, e
         )
         sig = _sanitize_text_signature(getattr(obj, "__text_signature__", None))
@@ -3001,7 +3022,7 @@ def show_function_source(target: object | str, *, unwrap: bool = True,
     import io
     # Resolve the object if 'target' is a string
     if isinstance(target, str):
-        name = target
+        name  = target
         frame = inspect.currentframe().f_back  # caller's frame
         try:
             obj = frame.f_locals.get(name)
@@ -3022,7 +3043,7 @@ def show_function_source(target: object | str, *, unwrap: bool = True,
                             base = getattr(base, part)
                         obj = base
                     except Exception as e:
-                        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                             "Failed to resolve %s: %s", part, e
                         )
             if obj is None:
@@ -3042,7 +3063,7 @@ def show_function_source(target: object | str, *, unwrap: bool = True,
         try:
             obj = inspect.unwrap(obj)
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "%s: Failed to unwrap %s: %s", return_method_name(), obj, e
             )
 
@@ -3094,7 +3115,7 @@ def show_function_source(target: object | str, *, unwrap: bool = True,
                 return src
             except Exception as e:
                 # Non-atomic fallback below
-                logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+                if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                     "my_atomic_write failed for %s: %s", path, e
                 )
         # newline="" lets print() manage newlines consistently across platforms
@@ -3191,62 +3212,156 @@ DNS_TEST_NAMES: list[str] = [
     "dns.google",       # Google DNS name
 ]
 
+# module-level shared executor (created on first use)
+_EXECUTOR: ThreadPoolExecutor | None = None
+
+
+def _get_executor() -> ThreadPoolExecutor | None:
+    """Create or return a shared thread pool; never blocks on shutdown."""
+    global _EXECUTOR
+    if _EXECUTOR is None:
+        _EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ud-timer")
+        import atexit
+        atexit.register(lambda: _EXECUTOR and _EXECUTOR.shutdown(wait=False, cancel_futures=True))
+    return _EXECUTOR
+
+
+def _call_with_timeout(fn, *args, timeout: float) -> tuple[bool, Any | None]:
+    """
+    Run fn(*args) in the shared pool and bound wall time.
+    Returns (True, result) before the timeout; (False, None) on timeout or error.
+    Never waits for the worker to finish if we time out.
+    """
+    from concurrent.futures import TimeoutError as FutTimeoutError
+    pool = _get_executor()
+    fut = pool.submit(fn, *args)
+    try:
+        return True, fut.result(timeout=timeout)
+    except FutTimeoutError:
+        fut.cancel()  # best-effort; we don't join
+        return False, None
+    except Exception as _e:
+        # optional: logging.debug("call_with_timeout exception: %r", _e)
+        fut.cancel()
+        return False, None
+
+
+def _dns_resolve(name: str, timeout: float) -> bool:
+    """
+    Try resolving a hostname using the system resolver, but impose a wall-clock cap.
+
+    Args:
+        name:    Hostname to resolve.
+        timeout: Per-attempt timeout (seconds).
+    
+    Returns:
+        True if resolution returns at least one address, else False.
+    
+    Raises:
+        None.
+    """
+    import socket
+    def _work(n: str) -> bool:
+        # Do *not* rely on setdefaulttimeout here; just let getaddrinfo run in a thread.
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("DNS: resolving %s", n)
+        res = socket.getaddrinfo(n, None, type=socket.SOCK_STREAM)
+        ok  = len(res) > 0
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("DNS: %s for %s", "success" if ok else "empty result", n)
+        return ok
+
+    ok, val = _call_with_timeout(_work, name, timeout=timeout)
+    if not ok:
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("DNS: timeout for %s (>%0.2fs)", name, timeout)
+        return False
+    return bool(val)
+
+
+def _any_dns_name_resolves(names: list[str], per_name_timeout: float, max_workers: int = 4) -> bool:
+    """
+    Resolve several names in parallel; return True on first success or False if all fail/time out.
+    The whole phase is bounded by roughly per_name_timeout (not names * timeout).
+
+    Args:
+        names:            List of DNS names to resolve.
+        per_name_timeout: Timeout (seconds) per name resolution attempt.
+        max_workers:      Maximum number of parallel worker threads (default 4).
+    
+    Returns:
+        True if any name resolves successfully, otherwise False.
+    
+    Raises:
+        None (errors are caught and logged at DEBUG level).
+    """
+    from concurrent.futures import wait, FIRST_COMPLETED
+    if not names:
+        return False
+    n_workers = max(1, min(len(names), max_workers))
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("DNS: concurrent phase (%d names, %d workers)", len(names), n_workers)
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(_dns_resolve, n, per_name_timeout) for n in names]
+        # Wait once up to per_name_timeout for *any* to finish successfully:
+        done, not_done = wait(futures, timeout=per_name_timeout, return_when=FIRST_COMPLETED)
+        # Fast check: if any completed True, bail out; otherwise collect late finishes briefly.
+        for f in done:
+            try:
+                if f.result():
+                    return True
+            except Exception:
+                pass
+        # Give remaining futures a tiny grace to finish (but don't block long):
+        for f in not_done:
+            f.cancel()
+    return False
+
+
+def _http_probe_with_cap(url: str, method: str, timeout: float,
+                         opener: urllib.request.OpenerDirector
+                         ) -> tuple[bool, int | None, bytes | None, str | None]:
+    """
+    Run _http_probe but bound total wall time (DNS + connect + read).
+    """
+    def _work():
+        return _http_probe(url=url, method=method, timeout=timeout, opener=opener)
+    ok, result = _call_with_timeout(_work, timeout=timeout)
+    if not ok or result is None:
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("HTTP: timeout for %s %s (>%0.2fs)", method, url, timeout)
+        return False, None, None, None
+    return result
+
 
 def _tcp_connect(host: str, port: int, timeout: float) -> bool:
     """
-    Attempt a TCP connection to a numeric IP address.
+    Attempt a TCP connection to a numeric IP address (no DNS).
 
     Args:
         host:    Numeric IP address (IPv4/IPv6) as a string.
         port:    Destination TCP port number.
         timeout: Per-attempt timeout (seconds).
-
+    
     Returns:
         True if TCP connection is successfully established, otherwise False.
-
+    
     Raises:
         None (errors are caught and logged at DEBUG level).
     """
+    import socket, ipaddress
     try:
-        import socket
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("TCP: connecting to %s:%d (timeout=%f)", host, port, timeout)
-        with socket.create_connection((host, port), timeout=timeout):
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("TCP: success %s:%d", host, port)
-            return True
-    except OSError as exc:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("TCP: failure %s:%d (%s)", host, port, exc)
+        ip     = ipaddress.ip_address(host)
+        family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+        sock   = socket.socket(family, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
+            "TCP: connecting to %s:%d (timeout=%f)", host, port, timeout
+        )
+        try:
+            sock.connect((host, port))
+        finally:
+            sock.close()
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("TCP: success %s:%d", host, port)
+        return True
+    except Exception as exc:
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("TCP: failure %s:%d (%s)", host, port, exc)
         return False
-
-
-def _dns_resolve(name: str, timeout: float) -> bool:
-    """
-    Try resolving a hostname using the system resolver.
-
-    Args:
-        name:    Hostname to resolve.
-        timeout: Per-attempt timeout (seconds).
-
-    Returns:
-        True if resolution returns at least one address, else False.
-
-    Raises:
-        None.
-    """
-    # socket has no per-call DNS timeout, so use global default temporarily.
-    import socket
-    default_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(timeout)
-    try:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("DNS: resolving %s (timeout=%f)", name, timeout)
-        res = socket.getaddrinfo(name, None, type=socket.SOCK_STREAM)
-        ok  = len(res) > 0
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("DNS: %s for %s", "success" if ok else "empty result", name)
-        return ok
-    except OSError as exc:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("DNS: failure for %s (%s)", name, exc)
-        return False
-    finally:
-        socket.setdefaulttimeout(default_timeout)
 
 
 def _build_http_opener(ignore_proxies: bool) -> urllib.request.OpenerDirector:
@@ -3293,7 +3408,7 @@ def _http_probe(url: str, method: str, timeout: float,
     req.add_header("User-Agent", f"{Path(sys.argv[0]).stem}/{__version__} (+python-urllib)")
 
     try:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HTTP: %s %s (timeout=%f)", method, url, timeout)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("HTTP: %s %s (timeout=%f)", method, url, timeout)
         with opener.open(req, timeout=timeout) as resp:
             status = getattr(resp, "status", None) or resp.getcode()
             data   = b""
@@ -3302,19 +3417,19 @@ def _http_probe(url: str, method: str, timeout: float,
             if method.upper() == "GET":
                 # Cap read size to avoid hanging on big captive pages.
                 data = resp.read(2048)
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HTTP: %s %s -> %d, final_url=%s", method, url, status, final_url)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("HTTP: %s %s -> %d, final_url=%s", method, url, status, final_url)
             return True, int(status), data, final_url
     except urllib.error.HTTPError as exc:
         try:
             body = exc.read(2048) if hasattr(exc, "read") else None
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HTTP: failed to read body from HTTPError: %s", e)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("HTTP: failed to read body from HTTPError: %s", e)
             body = None
         final_url = exc.geturl() if hasattr(exc, "geturl") else None  # ← keep this
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HTTP: HTTPError %s %s -> %d", method, url, exc.code)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("HTTP: HTTPError %s %s -> %d", method, url, exc.code)
         return False, int(exc.code), body, final_url
     except Exception as exc:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HTTP: failure %s %s (%s)", method, url, exc)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("HTTP: failure %s %s (%s)", method, url, exc)
         return False, None, None, None
 
 
@@ -3352,7 +3467,7 @@ def _http_meets_expectations(status: int | None, body: bytes | None, expect: dic
         try:
             text = body.decode(DEFAULT_ENCODING, errors="ignore")
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HTTP: failed to decode body: %s", e)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("HTTP: failed to decode body: %s", e)
             text = ""
         if str(expect["substr"]) not in text:
             return False
@@ -3384,7 +3499,7 @@ def _looks_like_captive(status: int | None, final_url: str | None, body: bytes |
         return True
     if status in (301, 302, 303, 307, 308):
         return True
-    b = (body or b"")[:256].casefold()
+    b = (body or b"")[:256].lower()  # bytes, safe for ASCII checks
     if status == 204 and b:
         return True
     if status == 200 and b:
@@ -3407,7 +3522,7 @@ def _should_use_proc_cap() -> bool:
         import resource  # type: ignore
         return os.name == "posix" and hasattr(resource, "RLIMIT_NPROC")
     except Exception as e:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "_should_use_proc_cap: exception checking resource module: %s", e
         )
         return False
@@ -3429,7 +3544,7 @@ def _advisory_user_proc_limit_cap(current_cap: int) -> int:
         cap         = max(1, int(soft * 0.75))
         return min(current_cap, cap)
     except Exception as e:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "_advisory_user_proc_limit_cap: exception checking resource limits: %s", e
         )
         return current_cap
@@ -3475,7 +3590,7 @@ def _run_tcp_checks_with_pool(tcp_targets: list[tuple[str, int]],
     Raises:
         None (creation failures are handled with backoff and logging).
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import as_completed
     # 1) Never spawn more workers than concurrent tasks; pick a safe cap.
     n_workers: int = _effective_workers(requested=requested_workers,
                                         num_tasks=len(tcp_targets),
@@ -3487,7 +3602,7 @@ def _run_tcp_checks_with_pool(tcp_targets: list[tuple[str, int]],
 
     for n in backoff_plan:
         try:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("ThreadPool: attempting max_workers=%d", n)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("ThreadPool: attempting max_workers=%d", n)
             with ThreadPoolExecutor(max_workers=n) as pool:
                 futures = {pool.submit(_tcp_connect, h, p, timeout): (h, p) for (h, p) in tcp_targets}
                 for fut in as_completed(futures):
@@ -3496,10 +3611,10 @@ def _run_tcp_checks_with_pool(tcp_targets: list[tuple[str, int]],
                             try:  # Optional: stop launching/awaiting more work asap
                                 pool.shutdown(cancel_futures=True)
                             except TypeError as e:  # Python < 3.9 doesn't support cancel_futures
-                                logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("ThreadPool: shutdown(cancel_futures=True) not supported: %s", e)
+                                if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("ThreadPool: shutdown(cancel_futures=True) not supported: %s", e)
                             return True
                     except Exception as exc:
-                        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("TCP: unexpected exception: %s", exc)
+                        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("TCP: unexpected exception: %s", exc)
             return False
         except (RuntimeError, OSError, MemoryError) as exc:
             logging.warning("Could not start thread pool with %d workers (%s). Trying fewer.", n, exc)
@@ -3518,62 +3633,69 @@ class CheckResult:
     captive_detected: bool
 
 
-def _check_once(timeout:     float, workers: int,
-                include_ipv6: bool, ignore_proxies: bool) -> CheckResult:
+def _check_once(timeout: float, workers: int, include_ipv6: bool, ignore_proxies: bool) -> CheckResult:
     """
-    Perform one pass of the connectivity checks.
+    Perform one pass of the connectivity checks with a total timeout budget.
 
     Args:
-        timeout:        Per-attempt timeout in seconds.
+        timeout:        Total timeout budget (seconds) for the entire attempt.
         workers:        Thread pool size for parallel network attempts.
         include_ipv6:   Whether to include IPv6 TCP targets.
         ignore_proxies: If True, bypass env proxies for HTTP probes.
-
+    
     Returns:
         CheckResult with booleans for TCP, DNS, HTTP, and captive portal detection.
-
+    
     Raises:
         None.
     """
-    import socket
+    import socket, time
+    start = time.monotonic()
+    def _remaining():
+        # Allow a little budget spread across phases; never below a small floor.
+        spent = time.monotonic() - start
+        rem = max(0.25, timeout - spent)  # per-attempt budget ~= timeout seconds
+        return rem
+
     tcp_targets: list[tuple[str, int]] = IPV4_TARGETS.copy()
     if include_ipv6 and getattr(socket, "has_ipv6", False):
         tcp_targets.extend(IPV6_TARGETS)
 
-    dns_ok:           bool = False
-    http_ok:          bool = False
-    captive_detected: bool = False
+    dns_ok           = False
+    http_ok          = False
+    captive_detected = False
 
-    # --- TCP connectivity to numeric IPs (with safe sizing & backoff) ---
-    tcp_ok: bool = _run_tcp_checks_with_pool(tcp_targets=tcp_targets,
-                                            timeout=timeout,
-                                            requested_workers=workers)
+    # 1) TCP connectivity (already self-bounded by per-connection timeouts)
+    tcp_ok = _run_tcp_checks_with_pool(tcp_targets=tcp_targets,
+                                       timeout=min(timeout, 5.0),
+                                       requested_workers=workers)
 
-    # --- DNS resolution (sequential with quick bail-out) ---
-    for name in DNS_TEST_NAMES:
-        if _dns_resolve(name, timeout=timeout):
-            dns_ok = True
-            break
+    # 2) DNS (parallel, with hard cap ~timeout seconds total for the phase)
+    dns_ok = _any_dns_name_resolves(DNS_TEST_NAMES, per_name_timeout=min( max(0.5, _remaining()), timeout))
 
-    # --- HTTP probes (sequential, quick bail-outs) ---
-    opener = _build_http_opener(ignore_proxies=ignore_proxies)
-    for probe in HTTP_PROBES:
-        ok, status, body, final_url = _http_probe(
-            url=probe["url"],
-            method=probe["method"],
-            timeout=timeout,
-            opener=opener,
-        )
-        if ok and _http_meets_expectations(status, body, probe["expect"]):
-            http_ok = True
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HTTP probe OK: %s", probe['note'])
-            break
-        # Any strong hints of a captive portal?
-        if _looks_like_captive(status, final_url, body):
-            captive_detected = True
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Captive portal suspected at %s (status=%d, final_url=%s)", probe['url'], status, final_url)
-            # We can stop early—being behind a captive portal ≠ usable internet.
-            break
+    # 3) HTTP probes: only try if DNS is healthy (avoids another resolver stall)
+    if dns_ok:
+        opener = _build_http_opener(ignore_proxies=ignore_proxies)
+        for probe in HTTP_PROBES:
+            rem = _remaining()
+            if rem <= 0.3:
+                break  # out of budget for this attempt
+            ok, status, body, final_url = _http_probe_with_cap(
+                url=probe["url"],
+                method=probe["method"],
+                timeout=min(rem, timeout),
+                opener=opener,
+            )
+            if ok and _http_meets_expectations(status, body, probe["expect"]):
+                http_ok = True
+                if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("HTTP probe OK: %s", probe['note'])
+                break
+            if _looks_like_captive(status, final_url, body):
+                captive_detected = True
+                if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
+                    "Captive portal suspected at %s (status=%s, final_url=%s)", probe['url'], status, final_url
+                )
+                break
 
     return CheckResult(
         tcp_ok=tcp_ok,
@@ -3622,13 +3744,13 @@ def is_internet_available(timeout_per_step: float = 2.5,
     """
     attempts: int = max(1, retries + 1)
     for attempt in range(1, attempts + 1):
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(f"Connectivity attempt {attempt}/{attempts}")
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(f"Connectivity attempt {attempt}/{attempts}")
         res = _check_once(timeout=timeout_per_step,
                           workers=workers,
                           include_ipv6=include_ipv6,
                           ignore_proxies=ignore_proxies)
 
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "Result(tcp_ok=%s, dns_ok=%s, http_ok=%s, captive=%s)",
             res.tcp_ok, res.dns_ok, res.http_ok, res.captive_detected
         )
@@ -3676,7 +3798,7 @@ def detect_shell(options: Options) -> None:
     shell_path = os.getenv("SHELL")
     if not shell_path:  # If shell_path is None or empty (""), try to get the parent process name
         try:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("SHELL environment variable not set, trying to detect shell from parent process.")
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("SHELL environment variable not set, trying to detect shell from parent process.")
             ppid   = os.getppid()
             result = subprocess.run(["ps", "-p", str(ppid), "-o", "comm="],
                                     capture_output=True, text=True, check=True)
@@ -3921,7 +4043,7 @@ def safe_exists(path: str | os.PathLike[str],
         return p.exists()
     except PermissionError:
         # Treat as 'exists but inaccessible' to avoid raising FileNotFoundError upstream
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "%s: permission denied: %s", return_method_name(), os.fspath(p)
         )
         return True
@@ -3930,7 +4052,7 @@ def safe_exists(path: str | os.PathLike[str],
         if e.errno in (errno.ENOENT, errno.ENOTDIR):
             return False
         if e.errno in IGNORE_THESE_ERRORS:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "%s: suppressed errno=%s (%s): %s", return_method_name(),
                 e.errno, getattr(errno, "errorcode", {}).get(e.errno, "?"), os.fspath(p)
             )
@@ -3960,11 +4082,11 @@ def safe_is_file(path: str | os.PathLike[str],
     try:
         return _is_file(p, follow_symlinks=follow_symlinks)
     except PermissionError:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("safe_is_file: permission denied: %s", p)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("safe_is_file: permission denied: %s", p)
         return False
     except OSError as e:
         if e.errno in IGNORE_THESE_ERRORS:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "%s: suppressed errno=%s (%s): %s", return_method_name(),
                 e.errno, getattr(errno, "errorcode", {}).get(e.errno, "?"), p
             )
@@ -3993,11 +4115,11 @@ def safe_is_dir(path: str | os.PathLike[str],
     try:
         return _is_dir(p, follow_symlinks=follow_symlinks)
     except PermissionError:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("safe_is_dir: permission denied: %s", p)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("safe_is_dir: permission denied: %s", p)
         return False
     except OSError as e:
         if e.errno in IGNORE_THESE_ERRORS:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "%s: suppressed errno=%s (%s): %s", return_method_name(),
                 e.errno, getattr(errno, "errorcode", {}).get(e.errno, "?"), p
             )
@@ -4026,13 +4148,13 @@ def safe_stat(path: str | os.PathLike[str],
     try:
         return p.stat() if follow_symlinks else p.lstat()
     except (PermissionError, FileNotFoundError):
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("%s: access/missing: %s",
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("%s: access/missing: %s",
                                                                           return_method_name(),
                                                                           os.fspath(p))
         return None
     except OSError as e:
         if e.errno in IGNORE_THESE_ERRORS:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "%s: suppressed errno=%s (%s): %s", return_method_name(),
                 e.errno, getattr(errno, "errorcode", {}).get(e.errno, "?"), p
             )
@@ -4147,7 +4269,7 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
             temp.unlink()
     except OSError as e:
         # If we can't remove it, we'll truncate on open later; free-space check may be conservative.
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Could not remove stale partial file %s: %s", os.fspath(temp), e)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Could not remove stale partial file %s: %s", os.fspath(temp), e)
 
     # Pre-flight: attempt to learn expected size and check free space.
     expected: int | None = None
@@ -4161,7 +4283,7 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
                 except ValueError:
                     expected = None
     except Exception as e:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("HEAD probe failed (%s); proceeding without pre-known size.", e)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("HEAD probe failed (%s); proceeding without pre-known size.", e)
 
     if expected is not None:
         # Skip re-download if size matches on disk already.
@@ -4179,7 +4301,7 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
                 else:
                     logging.error(f"File {os.fspath(dest)} exists but has a VERY CONFUSING size mismatch (have {dest_size}, need {expected}).")
             except OSError as e:
-                logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Could not remove stale partial file %s: %s", os.fspath(temp), e)
+                if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Could not remove stale partial file %s: %s", os.fspath(temp), e)
         free_bytes = query_free_space(dest)
         if free_bytes < expected:
             raise SystemExit(f"Not enough disk space: need {human_bytesize(expected)}, have {human_bytesize(free_bytes)}")
@@ -4198,7 +4320,7 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
                     try:
                         total_i = int(total.strip())
                     except ValueError as e:
-                        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Failed to parse Content-Length: %s", e)
+                        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Failed to parse Content-Length: %s", e)
                 # Re-check space at the moment of download if size is known.
                 if total_i is not None:
                     free_bytes = query_free_space(dest)
@@ -4222,7 +4344,7 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
                             bucket = pct // 10
                             # Log just once every ~10% but not at 0%
                             if pct and pct % 10 == 0 and bucket != last_bucket:
-                                logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("... %d%% (%s out of %s)", pct, human_bytesize(downloaded), human_bytesize(total_i))
+                                if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("... %d%% (%s out of %s)", pct, human_bytesize(downloaded), human_bytesize(total_i))
                                 last_bucket = bucket
                     f.flush()
                     os.fsync(f.fileno())
@@ -4256,7 +4378,7 @@ def download_file(url: str, dest: str | os.PathLike[str], retries: int = 5,
                 if not succeeded and safe_exists(temp):
                     temp.unlink()
             except OSError as e:
-                logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Failed to remove temporary file %s: %s", os.fspath(temp), e)
+                if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Failed to remove temporary file %s: %s", os.fspath(temp), e)
 
     raise SystemExit(f"Failed to download {url} after {retries} attempts. Last error: {last_err}")
 
@@ -4339,15 +4461,15 @@ def find_ffmpeg() -> str | None:
     for env_key in ("FFMPEG", "FFMPEG_PATH", "IMAGEIO_FFMPEG_EXE"):
         p = os.environ.get(env_key)
         if p:
-            p = ensure_file(p)
-            return os.fspath(p)
+            path_p = ensure_file(p)
+            return os.fspath(path_p)
 
     # 2) On PATH (handles .exe on Windows automatically)
     for name in ("ffmpeg", "ffmpeg.exe"):
         p = shutil.which(name)
         if p:
-            p = ensure_file(p)
-            return os.fspath(p)
+            path_p = ensure_file(p)
+            return os.fspath(path_p)
 
     # 3) Typical Conda/Miniconda/Mambaforge locations
     sp = Path(sys.prefix)  # current Python env prefix
@@ -4374,7 +4496,7 @@ def find_ffmpeg() -> str | None:
             p = ensure_file(p)
             return os.fspath(p)
     except Exception as e:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "Failed to find imageio-ffmpeg: %s", e
         )
 
@@ -4493,7 +4615,7 @@ def my_plural(n: int, word: str) -> str:
             return f"{n} {plural}"
     except Exception as e:
         # Fall through to custom logic if inflect isn't available or errors
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "my_plural: exception checking inflect library: %s", e
         )
 
@@ -4948,7 +5070,7 @@ def _parse_iso(given_date: str) -> dt.datetime:
     try:
         return isoparse(given_date)
     except ParserError as e:
-        raise ValueError(f"Invalid ISO8601 date '{given_date}': {e}") from e
+        raise ValueError(f"Invalid ISO8601 date '{given_date}'") from e
 
 
 def is_float(s: str) -> bool:
@@ -4978,30 +5100,30 @@ def _should_convert(given_date: AnyDateTimeType, format_str: str | None = None) 
 
     # 1) Numbers, JD/MJD, decimal years, special keywords
     if isinstance(given_date, (int, float)) and not isinstance(given_date, bool):
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Given date is a number: %s, so it will be converted by shifting the clock", given_date)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Given date is a number: %s, so it will be converted by shifting the clock", given_date)
         return True
     if isinstance(given_date, str):
         u = given_date.strip().upper()
         if u in ("J2000", "UNIX", "NOW"):
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Given date is a special keyword: %s, so it will be converted by shifting the clock", u)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Given date is a special keyword: %s, so it will be converted by shifting the clock", u)
             return True
         if format_str and format_str.upper() in ("JD", "MJD"):
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Given date has a format_str: %s, so it will be converted by shifting the clock", format_str)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Given date has a format_str: %s, so it will be converted by shifting the clock", format_str)
             return True
         if _JD_MJD_SIMPLE_RE.fullmatch(given_date):
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Given date is a JD/MJD: %s, so it will be converted by shifting the clock", given_date)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Given date is a JD/MJD: %s, so it will be converted by shifting the clock", given_date)
             return True
         # explicit offset or Z
         if _OFFSET_IN_STR_RE.search(given_date):
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Given date has an explicit offset or Z: %s, so it will be converted by shifting the clock", given_date)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Given date has an explicit offset or Z: %s, so it will be converted by shifting the clock", given_date)
             return True
     # 2) Any datetime/timestamp already aware
     if isinstance(given_date, dt.datetime) and given_date.tzinfo is not None:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Given date is an aware datetime: %s, so it will be converted by shifting the clock", given_date)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Given date is an aware datetime: %s, so it will be converted by shifting the clock", given_date)
         return True
 
     # Otherwise treat it as local‐time → attach only
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Given date is not a number, JD/MJD, or aware datetime: %s, so the timezone will be attached without shifting the clock", given_date)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Given date is not a number, JD/MJD, or aware datetime: %s, so the timezone will be attached without shifting the clock", given_date)
     return False
 
 
@@ -5030,14 +5152,14 @@ def _finalize_datetime(parsed_dt: dt.datetime, original_input: AnyDateTimeType,
         TypeError:  If the parsed_dt is not a datetime.datetime object.
     """
     if isinstance(tz_arg, str) and tz_arg.strip().upper() == "NAIVE":
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Naive timezone requested, returning datetime %s without any timezone info", parsed_dt)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Naive timezone requested, returning datetime %s without any timezone info", parsed_dt)
         return parsed_dt.replace(tzinfo=None)
     target_tz = parse_timezone(tz_arg)
     if should_convert is not False and (_should_convert(original_input, format_str) or should_convert is True):
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Converting datetime %s to timezone %s by shifting the clock", parsed_dt, target_tz)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Converting datetime %s to timezone %s by shifting the clock", parsed_dt, target_tz)
         return parsed_dt.astimezone(target_tz)
     else:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Attaching timezone %s to datetime %s without shifting the clock", target_tz, parsed_dt)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Attaching timezone %s to datetime %s without shifting the clock", target_tz, parsed_dt)
         return parsed_dt.replace(tzinfo=target_tz)
 
 
@@ -5174,7 +5296,7 @@ def parse_datetime(given_date: AnyDateTimeType, timezone: str | dt.tzinfo | None
             # Make sure the format string is a valid example of "units (optionally: since/after epoch)"
             # Try to split by since or after, whichever works:
             format_parts = re.split(r'\s+(since|after)\s+', format_str, maxsplit=1)
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Parsing date with format string: '%s' split into parts: %s", format_str, format_parts)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Parsing date with format string: '%s' split into parts: %s", format_str, format_parts)
             if len(format_parts) > 3:
                 raise ValueError(f"Invalid format string: '{format_str}'. Expected at most three parts: 'units', 'since/after', and 'epoch'.")
             # The first part should be acceptable by seconds_in_unit():
@@ -5350,7 +5472,7 @@ def _to_jsonable(obj: Any, *, roundtrip: bool, _seen: set[int]) -> Any:
             return {"__type__" : "namespace",
                     "value"    : _to_jsonable(vars(obj), roundtrip=roundtrip, _seen=_seen)} if roundtrip else vars(obj)
     except Exception as e:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "Failed to unwrap argparse.Namespace: %s", e
         )
     # datetime / date / time
@@ -5361,7 +5483,7 @@ def _to_jsonable(obj: Any, *, roundtrip: bool, _seen: set[int]) -> Any:
             which = "datetime" if isinstance(obj, dt.datetime) else ("date" if isinstance(obj, dt.date) else "time")
             return {"__type__": which, "value": iso} if roundtrip else iso
     except Exception as e:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "Failed to unwrap datetime/date/time: %s", e
         )
     # Decimal
@@ -5370,7 +5492,7 @@ def _to_jsonable(obj: Any, *, roundtrip: bool, _seen: set[int]) -> Any:
         if isinstance(obj, Decimal):
             return {"__type__": "decimal", "value": str(obj)} if roundtrip else float(obj)
     except Exception as e:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "Failed to unwrap decimal.Decimal: %s", e
         )
     # bytes-like
@@ -5381,7 +5503,7 @@ def _to_jsonable(obj: Any, *, roundtrip: bool, _seen: set[int]) -> Any:
             kind = "bytes" if isinstance(obj, bytes) else ("bytearray" if isinstance(obj, bytearray) else "memoryview")
             return {"__type__": kind, "value": b64} if roundtrip else b64
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "Failed to unwrap bytes/bytearray/memoryview: %s", e
             )
             return str(obj)
@@ -5391,12 +5513,12 @@ def _to_jsonable(obj: Any, *, roundtrip: bool, _seen: set[int]) -> Any:
         if isinstance(obj, re.Pattern):
             return {"__type__": "re_pattern", "pattern": obj.pattern, "flags": obj.flags} if roundtrip else obj.pattern
     except Exception as e:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "Failed to unwrap re.Pattern: %s", e
         )
     # Fallback
     stringified = str(obj)
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Object of type %s is not JSON serializable; converting to string: %s", type(obj).__name__, stringified)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Object of type %s is not JSON serializable; converting to string: %s", type(obj).__name__, stringified)
     return stringified if not roundtrip else {"__type__": "object", "value": stringified}
 
 
@@ -5430,7 +5552,7 @@ def from_jsonable(obj: Any) -> Any:
             import argparse
             return argparse.Namespace(**from_jsonable(obj.get("value", {})))
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "Failed to reconstruct argparse.Namespace: %s", e
             )
             return from_jsonable(obj.get("value", {}))
@@ -5445,7 +5567,7 @@ def from_jsonable(obj: Any) -> Any:
                 cls = getattr(cls, p)
             return getattr(cls, obj["name"])
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "Failed to reconstruct enum: %s", e
             )
             return obj.get("name")
@@ -5475,7 +5597,7 @@ def from_jsonable(obj: Any) -> Any:
             import base64
             return  bytearray(base64.b64decode(obj.get("value", "").encode("ascii")))
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "Failed to unwrap bytearray: %s", e
             )
             return obj.get("value")
@@ -5484,7 +5606,7 @@ def from_jsonable(obj: Any) -> Any:
             import base64
             return memoryview(base64.b64decode(obj.get("value", "").encode("ascii")))
         except Exception as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "Failed to unwrap memoryview: %s", e
             )
             return obj.get("value")
@@ -5509,7 +5631,7 @@ def _coerce_log_mode(value: Any) -> int:
         try:
             return int(s)
         except ValueError as e:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug(
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "Failed to coerce log mode from string: %s", e
             )
         # Handle level names like "INFO", "debug", etc. (case-insensitive)
@@ -5556,7 +5678,7 @@ def save_options_to_json(options: Options) -> None:
     with open(options.options_json_filepath, "w", encoding=DEFAULT_ENCODING) as json_file:
         json.dump(payload, json_file, indent=4, ensure_ascii=False)
 
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Options saved to JSON file: %s",
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Options saved to JSON file: %s",
                                                                       os.fspath(options.options_json_filepath))
 
 
@@ -5641,7 +5763,7 @@ def prompt_then_confirm(prompt: str) -> bool:
     return confirmation.casefold() == "yes" or confirmation.casefold() == "y"
 
 
-def prompt_then_choose(prompt: str, choices: list[str], default: str = None) -> str:
+def prompt_then_choose(prompt: str, choices: list[str], default: str | None = None) -> str:
     """
     Show a numbered list of choices and prompt the user to select one.
 
@@ -5693,7 +5815,7 @@ def my_title_case(the_title: str) -> str:
     return " ".join(capitalized_words)
 
 
-def filename_format(text: str, sep: str = "_", max_length: int = None) -> str:
+def filename_format(text: str, sep: str = "_", max_length: int | None = None) -> str:
     """
     Turn arbitrary text into an ASCII-only, filesystem‐safe base filename.
     WARNING: Do not include an extension in the text, because this function
@@ -6478,7 +6600,7 @@ def my_diff(orig_text:     str, changed_text: str,
     orig_path = ensure_path(orig_path)
     if not changed_path:
         changed_path = orig_path
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("At the top of the function %s(), diff_choice=%s", return_method_name(), diff_choice)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("At the top of the function %s(), diff_choice=%s", return_method_name(), diff_choice)
     orig_lines    =    orig_text.splitlines(keepends=True)
     changed_lines = changed_text.splitlines(keepends=True)
     the_digits    = max(len(str(len(orig_lines))), len(str(len(changed_lines))))
@@ -6545,7 +6667,7 @@ def my_diff(orig_text:     str, changed_text: str,
             last_removed = None
 
     if diff_choice == 0:  # old style diff (difflib.Differ)
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Using old-style diff for %s with %d original and %d fixed lines.", os.fspath(orig_path), len(orig_lines), len(changed_lines))
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Using old-style diff for %s with %d original and %d fixed lines.", os.fspath(orig_path), len(orig_lines), len(changed_lines))
         orig_lineno = 1
         new_lineno  = 1
         for line in difflib.Differ().compare(orig_lines, changed_lines):
@@ -6569,7 +6691,7 @@ def my_diff(orig_text:     str, changed_text: str,
         process_hunk()
         flush_removed(orig_lineno)
     elif diff_choice >= 1:  # unified or context diff
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Using unified diff for %s with %d original and %d fixed lines.", os.fspath(orig_path), len(orig_lines), len(changed_lines))
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Using unified diff for %s with %d original and %d fixed lines.", os.fspath(orig_path), len(orig_lines), len(changed_lines))
         ctx  = max(diff_choice - 1, 0)
         diff = difflib.unified_diff(
             orig_lines, changed_lines,
@@ -6688,7 +6810,7 @@ def diff_and_confirm(orig_text: str, changed_text: str,
         ValueError: If the specified path is not a file. The function which raises this exception is my_fopen().
     """
     fallback_logging_config()
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("At the top of the function %s(), diff_choice=%s", return_method_name(), diff_choice)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("At the top of the function %s(), diff_choice=%s", return_method_name(), diff_choice)
     path = ensure_file(path)
     my_diff(orig_text, changed_text, path, diff_choice=diff_choice,
             changed_color=changed_color, deleted_color=deleted_color, added_color=added_color)
@@ -6749,7 +6871,7 @@ def ask_and_autopep8(path: str | os.PathLike[str], code: str,
     import autopep8
     fallback_logging_config()
     path = ensure_file(path)
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("At the top of the function %s(), diff_choice=%s", return_method_name(), diff_choice)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("At the top of the function %s(), diff_choice=%s", return_method_name(), diff_choice)
     # The number of blank lines expected in various contexts.
     blank_line_overrides = {
         "E301" : 1,  # expected 1 blank line, found 0
@@ -6903,9 +7025,9 @@ def multireplace(options: Options, verbose: bool = True) -> None:
         logging.error(str(e))
         sys.exit(2)
 
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Directory: %s", dir)
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Glob pattern: %s", options.args.glob_pattern)
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Recursive: %s", options.args.recursive)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Directory: %s", dir)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Glob pattern: %s", options.args.glob_pattern)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Recursive: %s", options.args.recursive)
 
     files = _collect_files(dir, options.args.glob_pattern, options.args.recursive)
 
@@ -6968,7 +7090,7 @@ def interactive_flake8(options: Options,
     """
     fallback_logging_config()
     path = ensure_file(path)
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("At the top of the function %s(), diff_choice=%s", return_method_name(), diff_choice)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("At the top of the function %s(), diff_choice=%s", return_method_name(), diff_choice)
     if ignore_codes is None:
         ignore_codes: list[str] = []
     if not run_flake8(options, path, ignore_codes=ignore_codes, max_line_length=max_line_length):
@@ -6976,11 +7098,11 @@ def interactive_flake8(options: Options,
         return True
     codes = _gather_flake8_issues(options, path, ignore_codes=ignore_codes, max_line_length=max_line_length)
     fixable_codes = get_autopep8_fixable_codes()
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Autopep8 can fix these codes: %s", fixable_codes)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Autopep8 can fix these codes: %s", fixable_codes)
     touched_code = False
     for code, desc in codes.items():
         if code not in fixable_codes:
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Skipping %s: no autopep8 fixer", code)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Skipping %s: no autopep8 fixer", code)
             continue
         logging.info("\n→ %s: %s", ANSI_RED + code + ANSI_RESET, ANSI_YELLOW + desc + ANSI_RESET)
         if not ask_and_autopep8(path, code, desc, diff_choice=diff_choice,
@@ -7299,7 +7421,7 @@ def main() -> None:
     parse_arguments(options)
     memory_handler = ud.configure_logging(options.my_name, log_level=options.log_mode,
                                           rawlog=True)
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Directory: %s", options.args.directory)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Directory: %s", options.args.directory)
     state = {
         "excluded_dirs"   : options.args.exclude_dirs,
         "already_printed" : set(),
@@ -7632,12 +7754,12 @@ def decode_utf8(raw_bytes: bytes, path: str = "input string") -> str | None:
     try:
         text = raw_bytes.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("%s failed to decode as UTF‑8.", path)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("%s failed to decode as UTF‑8.", path)
         return None
     if any(0x0080 <= ord(ch) <= 0x009F for ch in text):
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("%s contains lone C1 controls, not valid UTF-8.", os.fspath(path))
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("%s contains lone C1 controls, not valid UTF-8.", os.fspath(path))
         return None
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("%s decoded as valid UTF‑8.", os.fspath(path))
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("%s decoded as valid UTF‑8.", os.fspath(path))
     return text
 
 
@@ -7649,11 +7771,11 @@ def decode_cp1252(raw_bytes: bytes, path: str = "input string") -> str | None:
     fallback_logging_config()
     try:
         text = raw_bytes.decode("cp1252", errors="strict")
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("%s decoded as valid CP1252.",
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("%s decoded as valid CP1252.",
                                                                           os.fspath(path))
         return text
     except UnicodeDecodeError:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("%s failed to decode as CP1252.", os.fspath(path), exc_info=True)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("%s failed to decode as CP1252.", os.fspath(path), exc_info=True)
         return None
 
 
@@ -7664,9 +7786,9 @@ def contains_mojibake(text: str) -> bool:
     try:
         mojibake_present = ftfy.badness.is_bad(text)
     except Exception:  # Catch any unexpected errors from ftfy without crashing
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Failed to check for mojibake.", exc_info=True)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Failed to check for mojibake.", exc_info=True)
         mojibake_present = False
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Mojibake present: %s", mojibake_present)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Mojibake present: %s", mojibake_present)
     # I HAVEN'T TRIED THIS NEXT LINE, BUT IT MIGHT CAUSE FEWER FALSE POSITIVES:
     # return ftfy.badness(text) > 1
     return mojibake_present
@@ -7679,7 +7801,7 @@ def fix_text(current_text: str, path: str | os.PathLike[str], raw_bytes: bytes) 
     import ftfy
     fallback_logging_config()
     path = ensure_file(path)
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Checking %s for mojibake.",
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Checking %s for mojibake.",
                                                                       os.fspath(path))
     if not contains_mojibake(current_text):
         return None
@@ -7695,7 +7817,7 @@ def fix_text(current_text: str, path: str | os.PathLike[str], raw_bytes: bytes) 
             mangled_original = raw_bytes.decode("cp1252", errors="replace")
             my_diff(mangled_original, fixed, path)
         except Exception:  # Catch any unexpected errors from decoding but don't crash.
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Could not simulate browser mangling in %s.", os.fspath(path), exc_info=True)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Could not simulate browser mangling in %s.", os.fspath(path), exc_info=True)
     return fixed
 
 
@@ -7740,7 +7862,7 @@ def ensure_utf8_meta(html: str) -> str:
 
 def my_atomic_write(filepath: str | Path | os.PathLike[str], data: str | bytes | bytearray,
                     write_mode: Literal["w", "a"], encoding: str = DEFAULT_ENCODING,
-                    lock_timeout: float = None,  # seconds to wait for lock (None = forever)
+                    lock_timeout: float | None = None,  # seconds to wait for lock (None = forever)
                     ) -> None:
     """
     Atomically write 'data' to 'filepath' with an advisory lock.
@@ -7845,7 +7967,7 @@ def treeview_new_files(directory:      str | os.PathLike[str],
                        last_mtime: float | None = None, maxlines: int = 0,
                        use_colors: bool = True, print_root: bool = True,
                        prefix: str = "", is_last: bool = True, level: int = 0,
-                       state: dict = None, probe_only: bool = False) -> bool:
+                       state: dict[str, Any] | None = None, probe_only: bool = False) -> bool:
     """
     Recursively scan the directory, print the contents of files newer than last_file_path (if provided- if so store its modification date in last_mtime). Return True if any relevant files are found.
 
@@ -7886,7 +8008,7 @@ def treeview_new_files(directory:      str | os.PathLike[str],
 
     if last_file_path is None:
         last_mtime = 0
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("%sNo last file path provided, considering all files.", prefix)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("%sNo last file path provided, considering all files.", prefix)
     else:
         last_file_path = ensure_path(last_file_path)
         if not safe_exists(last_file_path):
@@ -7898,7 +8020,7 @@ def treeview_new_files(directory:      str | os.PathLike[str],
                           prefix, os.fspath(last_file_path))
             return False
         last_mtime_readable = dt.datetime.fromtimestamp(last_mtime).strftime("%Y-%m-%d %H:%M:%S")
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("%sLast file path: %s (mtime: %s)",
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("%sLast file path: %s (mtime: %s)",
                                                                           prefix,
                                                                           os.fspath(last_file_path), last_mtime_readable)
 
@@ -8070,6 +8192,7 @@ def ensure_daemon_running() -> None:
         if not launcher.success:
             my_critical_error("Failed to launch Docker Desktop. Please start it from your Applications folder.")
         # Wait for the daemon to start...
+        import time
         for _ in range(10):
             time.sleep(3)
             info = my_popen(["docker", "info"])
@@ -8327,7 +8450,7 @@ def detect_country(force_wtfismyip: bool = False) -> str | None:
     import json
     thecountryname = None
     if not force_wtfismyip:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("force_wtfismyip=%s.", force_wtfismyip)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("force_wtfismyip=%s.", force_wtfismyip)
         try:
             if "IPINFO_API_TOKEN" in os.environ:
                 ipinfo_access_token = os.environ['IPINFO_API_TOKEN']
@@ -8340,19 +8463,19 @@ def detect_country(force_wtfismyip: bool = False) -> str | None:
             # handler = ipinfo.getHandler(ipinfo_access_token,
             #                             request_options={"timeout": ipinfo_timeout_seconds})
             # details = handler.getDetails()
-            # logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("IPinfo DETAILS:\n%s", details)
+            # if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("IPinfo DETAILS:\n%s", details)
             # thecountryname = details.country
             the_command = ["curl", f"https://api.ipinfo.io/lite/8.8.8.8?token={ipinfo_access_token}"]
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Running command: %s", " ".join(the_command))
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Running command: %s", " ".join(the_command))
             result = subprocess.run(the_command, capture_output=True,
                                     text=True, timeout=5)
             if result.returncode != 0:
                 logging.error("curl command failed with return code %d", result.returncode)
                 raise Exception("Curl command failed")
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("curl output: %s", result.stdout)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("curl output: %s", result.stdout)
             dct = json.loads(result.stdout)
             thecountryname = dct.get("country", "")
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Detected country from curl: %s", thecountryname)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Detected country from curl: %s", thecountryname)
         except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
             logging.warning("IPinfo exception: %s\nFalling back to wtfismyip.com.", e)
 
@@ -8362,7 +8485,7 @@ def detect_country(force_wtfismyip: bool = False) -> str | None:
             resp.raise_for_status()
             dct = resp.json()
             thecountryname = dct.get("YourFuckingCountry", "")
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Detailed results: %s", dct)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Detailed results: %s", dct)
         except requests.exceptions.RequestException as e:
             logging.error("Country detection failed (network error): %s", e)
             return None
@@ -8412,10 +8535,10 @@ def set_system_volume(percent: int, tolerance: int = 1,
             raise ValueError("change_mute must be 'mute', 'unmute', or None")
     # First, try using pulsectl to set the volume.
     if not force_pactl:
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("force_pactl=%s.", force_pactl)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("force_pactl=%s.", force_pactl)
         try:
             from pulsectl import Pulse, PulseError
-            logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("[pulsectl] Attempting to set the volume to %d%% using pulsectl...", percent)
+            if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("[pulsectl] Attempting to set the volume to %d%% using pulsectl...", percent)
             with Pulse("volume-setter") as pulse:
                 default_name = pulse.server_info().default_sink_name
                 sink = pulse.get_sink_by_name(default_name)
@@ -8453,27 +8576,27 @@ def set_system_volume(percent: int, tolerance: int = 1,
             logging.error("[pulsectl] Unexpected error: %s; falling back to pactl...", e)
 
     # Fallback to pactl if pulsectl is not available or fails
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("[pactl] Attempting to set the volume to %d%% using pactl...", percent)
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("[pactl] Attempting to set the volume to %d%% using pactl...", percent)
     the_command = ["pactl", "suspend-sink", "@DEFAULT_SINK@", "0"]
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("[pactl] Running command: %s", " ".join(the_command))
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("[pactl] Running command: %s", " ".join(the_command))
     result = subprocess.run(the_command, check=True, capture_output=True, text=True)
     if result.stderr:
         raise RuntimeError(f"[pactl] Error waking up sink from suspension: {result.stderr.strip()}")
     the_command = ["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{percent}%"]
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("[pactl] Running command: %s", " ".join(the_command))
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("[pactl] Running command: %s", " ".join(the_command))
     result = subprocess.run(the_command, check=True, capture_output=True, text=True)
     if result.stderr:
         raise RuntimeError(f"[pactl] Error setting volume: {result.stderr.strip()}")
     # Set mute if requested
     if mute_arg is not None:
         cmd = ["pactl", "set-sink-mute", "@DEFAULT_SINK@", str(mute_arg)]
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("[pactl] %s", " ".join(cmd))
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("[pactl] %s", " ".join(cmd))
         mute_result = subprocess.run(cmd, check=True, capture_output=True, text=True)
         if mute_result.stderr:
             raise RuntimeError(f"[pactl] Error setting mute: {mute_result.stderr.strip()}")
         # Verify mute state
         mute_check_cmd = ["pactl", "get-sink-mute", "@DEFAULT_SINK@"]
-        logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("[pactl] Running command: %s", " ".join(mute_check_cmd))
+        if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("[pactl] Running command: %s", " ".join(mute_check_cmd))
         mute_result = subprocess.run(mute_check_cmd, check=True, capture_output=True, text=True)
         if mute_result.stderr:
             raise RuntimeError(f"[pactl] Error getting mute state: {mute_result.stderr.strip()}")
@@ -8485,7 +8608,7 @@ def set_system_volume(percent: int, tolerance: int = 1,
         logging.info("[pactl] Audio %s", 'muted' if mute_arg else 'unmuted')
     # Verify volume setting with pactl
     the_command = ["pactl", "get-sink-volume", "@DEFAULT_SINK@"]
-    logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("[pactl] Running command: %s", " ".join(the_command))
+    if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("[pactl] Running command: %s", " ".join(the_command))
     result = subprocess.run(the_command, check=True, capture_output=True, text=True)
     if result.stderr:
         raise RuntimeError(f"[pactl] Error getting volume: {result.stderr.strip()}")
@@ -8787,14 +8910,14 @@ TEXT_ENCODINGS_SET: Final[frozenset[str]] = frozenset(TEXT_ENCODINGS)  # sets ar
 #             names.add(codecs.lookup(m.name).name)
 #         except LookupError as e:
 #             # Skip helpers like 'aliases' or any non-codec modules
-#             logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Skipping module %s: %s", m.name, e)
+#             if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Skipping module %s: %s", m.name, e)
 #     # 2) Try all alias keys and targets
 #     for n in set(alias_map) | set(alias_map.values()):
 #         try:
 #             names.add(codecs.lookup(n).name)
 #         except LookupError as e:
 #             # Skip platform-specific codecs not present here (e.g., 'mbcs' on Linux/macOS)
-#             logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Skipping alias %s: %s", n, e)
+#             if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Skipping alias %s: %s", n, e)
 #     return sorted(names)
 # # Example usage
 # encs = all_encodings()
@@ -8808,7 +8931,7 @@ TEXT_ENCODINGS_SET: Final[frozenset[str]] = frozenset(TEXT_ENCODINGS)  # sets ar
 #         try:
 #             codecs.lookup(n)
 #         except LookupError as e:
-#             logging.getLogger().isEnabledFor(logging.DEBUG) and logging.debug("Invalid encoding '%s': %s", n, e)
+#             if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("Invalid encoding '%s': %s", n, e)
 #             bad.append(n)
 #     return bad
 # bad = invalid_encodings(TEXT_ENCODINGS)
