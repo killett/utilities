@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 
 # Written by Emmy Killett (she/her), ChatGPT 4o (it/its), ChatGPT o1-preview (it/its), ChatGPT o3-mini-high (it/its), ChatGPT o4-mini-high (it/its), ChatGPT 5 Thinking (it/its), and GitHub Copilot (it/its).
-from __future__ import annotations  # For Python 3.7+ compatibility with type annotations
+from __future__         import annotations  # For Python 3.7+ compatibility with type annotations
 import os
 import sys
-from pathlib import Path  # Preferred over os.path for path manipulations.
 import logging
-from collections.abc import Sequence, Callable, Iterable
-from itertools import chain
-from typing import TextIO, Any, TypeAlias, Type, Literal, Final
-import re  # Used to precompile regexes for performance
-from dataclasses import dataclass, field, replace
-from enum import Enum
-import errno
+from pathlib            import Path  # Preferred over os.path for path manipulations.
+from collections.abc    import Sequence, Callable, Iterable
+from itertools          import chain
+from typing             import TextIO, Any, TypeAlias, Type, Literal, Final, Protocol, overload
+from dataclasses        import dataclass, field, replace
+from enum               import Enum
 from concurrent.futures import ThreadPoolExecutor
+import errno
+import re  # Used to precompile regexes for performance
 
 # Version of univ_defs.py:
 __version__: Final[str] = "0.2.1"
@@ -75,8 +75,13 @@ class Options:
 
     def __init__(self) -> None:
         """Initialize the options with default values."""
-        self.log_mode: int = logging.INFO
-        self.home:    Path = Path.home()  # User's home directory
+        self.log_mode:                      int = logging.INFO
+        self.home:                         Path = Path.home()  # User's home directory
+        self.shell:                  str | None = None
+        self.rc_file:               Path | None = None
+        self.alias:                  str | None = None  # The alias to use for this script, if any.
+        self.alias_command:          str | None = None  # The command to run when the alias is used.
+        self.additional_alias_files: list[Path] = []
 
 
 class PlotOptions(Options):
@@ -386,7 +391,7 @@ def my_fopen(file_path: str | os.PathLike[str],
              suppress_errors: bool = False,
              rawlog:          bool = False,
              numlines:  int | None = None,
-             verbose:         bool = True) -> str | bool:
+             verbose:         bool = True) -> str | Literal[False]:
     """
     Attempt to read a text file with various encodings and return the file content if successful. Optionally, specify numlines to limit the number of lines read.
 
@@ -399,7 +404,7 @@ def my_fopen(file_path: str | os.PathLike[str],
 
     Returns:
         The content of the file as a string.
-        Returns False:
+        Returns Literal[False]:
          - if the file does not exist
          - is empty
          - is a non-text file (video, audio, image, archive)
@@ -1653,9 +1658,18 @@ class LLMs:
             )
         return eff, ctx, reasons_map
 
+    # Use overloads to indicate the different return types based on return_reasons to appease mypy.
+    @overload
     def alternative_model(self, *, strategy: SelectionStrategy | str,
-                          return_reasons: bool = False,
-                          **cfg_overrides) -> ModelInfo | tuple[ModelInfo,dict[str, list[str]]]:
+                          return_reasons: Literal[True],
+                          **cfg_overrides) -> tuple[ModelInfo, dict[str, list[str]]]: ...
+    @overload
+    def alternative_model(self, *, strategy: SelectionStrategy | str,
+                          return_reasons: Literal[False] = False,  # This shows the default value for return_reasons is False
+                          **cfg_overrides) -> ModelInfo: ...
+
+    def alternative_model(self, *, strategy: SelectionStrategy | str,
+                          return_reasons: bool = False, **cfg_overrides):
         """
         Return the best candidate under a given strategy using a TEMPORARY config
         built from the current config + partial overrides (e.g., only_local_models=True),
@@ -1872,8 +1886,8 @@ class LLMs:
             try:
                 self._temp_unavailable_models.clear()
                 self._temp_unavailable_providers.clear()
-            except Exception as e:
-                logging.warning("Could not clear temporary banlists: %s", e)
+            except Exception as e2:
+                logging.warning("Could not clear temporary banlists: %s", e2)
         except Exception as e:
             # Mark the current model as temporarily unavailable for re-selection
             try:
@@ -1882,8 +1896,8 @@ class LLMs:
                 # Only ban the provider if it looks like a provider-wide issue
                 if isinstance(prov, str) and prov and self._should_ban_provider_for(e):
                     self._temp_unavailable_providers.add(prov)
-            except Exception as e:
-                logging.warning("Could not update temporary banlists: %s", e)
+            except Exception as e3:
+                logging.warning("Could not update temporary banlists: %s", e3)
             # ---- Iterative failover: try the next best candidates under the same strategy ----
             base_cfg = self._base_config or self.get_config()
             last_exc = e
@@ -1908,18 +1922,18 @@ class LLMs:
                     try:
                         self._temp_unavailable_models.clear()
                         self._temp_unavailable_providers.clear()
-                    except Exception as e:
-                        logging.warning("Could not clear temporary banlists: %s", e)
+                    except Exception as e4:
+                        logging.warning("Could not clear temporary banlists: %s", e4)
                     return self._extract_text_from_openai_like(resp)
-                except Exception as e2:
-                    last_exc = e2
+                except Exception as e5:
+                    last_exc = e5
                     try:
                         self._temp_unavailable_models.add(failover_model)
                         prov2 = (self.model_info.get(failover_model, {}) or {}).get("provider")
-                        if isinstance(prov2, str) and prov2 and self._should_ban_provider_for(e2):
+                        if isinstance(prov2, str) and prov2 and self._should_ban_provider_for(e5):
                             self._temp_unavailable_providers.add(prov2)
-                    except Exception as e:
-                        logging.warning("Could not update temporary banlists: %s", e)
+                    except Exception as e6:
+                        logging.warning("Could not update temporary banlists: %s", e6)
             # If we reach here, all failovers failed
             my_critical_error(
                 f"LiteLLM request failed for model '{model}' and iterative failover also failed. "
@@ -2074,6 +2088,8 @@ class LLMs:
         try:
             self._ensure_litellm()
             litellm = self._litellm_mod  # type: ignore
+            if litellm is None:
+                raise RuntimeError("LiteLLM not available")
             # 1) Zero-cost-ish metadata path
             get_info = getattr(litellm, "get_model_info", None)
             if callable(get_info):
@@ -2504,30 +2520,28 @@ class LLMs:
         if model in self._pricing_cache:
             return self._pricing_cache[model]
 
-        entry = self.model_info.get(model, {})
+        entry:  dict[str, Any] = self.model_info.get(model, {})
+        context:           int = int(entry.get("context", _DEFAULT_MODEL_CONTEXT))
+        in_cost:  float | None = None
+        out_cost: float | None = None
 
         # Local models: $0 and registry context
         if entry.get("local") is True:
-            ctx = int(entry.get("context", _DEFAULT_MODEL_CONTEXT))
             in_cost = out_cost = 0.0
-            self._pricing_cache[model] = (in_cost, out_cost, ctx)
+            self._pricing_cache[model] = (in_cost, out_cost, context)
             return self._pricing_cache[model]
 
         # ---- non-local path ----
-        in_cost  = None
-        out_cost = None
-        context  = int(entry.get("context", _DEFAULT_MODEL_CONTEXT))
-
         try:
             import litellm  # type: ignore
             info_fn = getattr(litellm, "get_model_info", None)
-            md = {}
+            md: dict[str, Any] = {}
             if callable(info_fn):
                 try:
                     md = info_fn(model) or {}
-                except Exception as e:
+                except Exception as e2:
                     if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
-                        "LiteLLM get_model_info(%s) failed: %s", model, e
+                        "LiteLLM get_model_info(%s) failed: %s", model, e2
                     )
                     md = {}
 
@@ -2887,7 +2901,7 @@ def load_ast_var(var_name: str, script_path: str | os.PathLike[str],
     script_path  = ensure_file(script_path)
     file_content = my_fopen(script_path, rawlog=rawlog)
     if not file_content:
-        my_critical_error(f"Failed to open {os.fspath(script_path)}", choose_breakpoint=True)
+        raise FileNotFoundError(f"Failed to open {os.fspath(script_path)}")
     tree = ast.parse(file_content, script_path)
     if tree is None:
         raise SyntaxError(f"Could not parse {os.fspath(script_path)}")
@@ -2965,7 +2979,9 @@ def _builtin_stub(obj: object) -> str:
     header = f"# {context}\n" if context else ""
 
     try:
-        sig = str(inspect.signature(obj))
+        # Tell inspect.signature that obj is callable to appease mypy
+        from typing import cast, Callable as TypingCallable
+        sig = str(inspect.signature(cast(TypingCallable[..., Any], obj)))
     except Exception as e:
         if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "_builtin_stub: inspect.signature failed for %s: %s", def_name, e
@@ -3020,10 +3036,16 @@ def show_function_source(target: object | str, *, unwrap: bool = True,
     import inspect
     import pydoc
     import io
+    from types  import FrameType
+    from typing import cast, Callable as TypingCallable
     # Resolve the object if 'target' is a string
     if isinstance(target, str):
         name  = target
-        frame = inspect.currentframe().f_back  # caller's frame
+        currentframe = inspect.currentframe()
+        assert currentframe is not None
+        theframe = currentframe.f_back  # caller's frame
+        assert theframe is not None
+        frame: FrameType = theframe     # help mypy narrow for f_locals / f_globals
         try:
             obj = frame.f_locals.get(name)
             if obj is None:
@@ -3061,7 +3083,8 @@ def show_function_source(target: object | str, *, unwrap: bool = True,
     # Optionally unwrap decorated functions
     if unwrap:
         try:
-            obj = inspect.unwrap(obj)
+            # Tell inspect.signature that obj is callable to appease mypy
+            obj = inspect.unwrap(cast(TypingCallable[..., Any], obj))
         except Exception as e:
             if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
                 "%s: Failed to unwrap %s: %s", return_method_name(), obj, e
@@ -3079,18 +3102,18 @@ def show_function_source(target: object | str, *, unwrap: bool = True,
     # Built-ins / C-extensions don't have retrievable Python source
     if inspect.isbuiltin(obj) or inspect.ismethoddescriptor(obj):
         src = _builtin_stub(obj)
-    else:
-        src = inspect.getsource(obj)
+    else:  # Tell inspect.signature that obj is callable to appease mypy
+        src = inspect.getsource(cast(TypingCallable[..., Any], obj))
 
     # Decide where to write
-    out: TextIO
+    out:                       TextIO
     closer: Callable[[], None] | None = None  # callable to close if *we* open a file
-    note: str | None = None
+    note:                  str | None = None
     if output is None:
         out = sys.stdout
     # Accept known text-mode IO bases directly
     elif isinstance(output, (io.TextIOBase, io.StringIO)):
-        out = output
+        out = cast(TextIO, output)  # Tell mypy that "out" has type TextIO
     # Accept "-" as a common alias for stdout
     elif isinstance(output, (str, os.PathLike)) and str(output) == "-":
         out = sys.stdout
@@ -3216,13 +3239,16 @@ DNS_TEST_NAMES: list[str] = [
 _EXECUTOR: ThreadPoolExecutor | None = None
 
 
-def _get_executor() -> ThreadPoolExecutor | None:
+def _get_executor() -> ThreadPoolExecutor:
     """Create or return a shared thread pool; never blocks on shutdown."""
     global _EXECUTOR
     if _EXECUTOR is None:
         _EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ud-timer")
+        executor  = _EXECUTOR
+        assert executor is not None  # for mypy
         import atexit
-        atexit.register(lambda: _EXECUTOR and _EXECUTOR.shutdown(wait=False, cancel_futures=True))
+        atexit.register(executor.shutdown, wait=False, cancel_futures=True)
+    assert _EXECUTOR is not None  # for mypy: function guarantees a pool
     return _EXECUTOR
 
 
@@ -3234,7 +3260,7 @@ def _call_with_timeout(fn, *args, timeout: float) -> tuple[bool, Any | None]:
     """
     from concurrent.futures import TimeoutError as FutTimeoutError
     pool = _get_executor()
-    fut = pool.submit(fn, *args)
+    fut  = pool.submit(fn, *args)
     try:
         return True, fut.result(timeout=timeout)
     except FutTimeoutError:
@@ -4491,10 +4517,15 @@ def find_ffmpeg() -> str | None:
     # 5) Optional: imageio-ffmpeg packaged binary if user has it
     try:
         import imageio_ffmpeg  # type: ignore
-        p = imageio_ffmpeg.get_ffmpeg_exe()
-        if p:
-            p = ensure_file(p)
-            return os.fspath(p)
+        p_str: str | None = imageio_ffmpeg.get_ffmpeg_exe()
+        if p_str:
+            p_path = ensure_path(p_str)
+            if safe_is_file(p_path) and os.access(os.fspath(p_path), os.X_OK):
+                return os.fspath(p_str)
+            else:
+                raise ValueError(f"imageio-ffmpeg returned non-executable path: {p_str}")
+        else:
+            raise ValueError(f"imageio-ffmpeg returned {p_str}")
     except Exception as e:
         if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug(
             "Failed to find imageio-ffmpeg: %s", e
@@ -4575,6 +4606,25 @@ def human_bytesize(num: float | int | None, *, suffix: str = "B", si: bool = Fal
         return f"{sign}{s}{sep}{symbols[i]}{suffix}"
 
 
+class InflectEngine(Protocol):
+    """Protocol for the 'inflect' library's engine interface."""
+    def plural_noun(self, word: str, count: int | None = ...) -> str | Literal[False]: ...
+    def plural(self, word: str) -> str: ...
+
+
+_INFLECT_ENGINE: InflectEngine | None = None
+
+
+def _get_inflect_engine() -> InflectEngine:
+    """Get or create a singleton inflect engine instance."""
+    global _INFLECT_ENGINE
+    if _INFLECT_ENGINE is None:
+        import inflect  # type: ignore[import-not-found]
+        _INFLECT_ENGINE = inflect.engine()  # type: ignore[assignment]
+    assert _INFLECT_ENGINE is not None
+    return _INFLECT_ENGINE
+
+
 def my_plural(n: int, word: str) -> str:
     """
     Return a pluralized version of 'word' preceded by 'n'.
@@ -4600,17 +4650,9 @@ def my_plural(n: int, word: str) -> str:
         return f"{n} {word}"
 
     # 1) Try the open-source 'inflect' library if present
-    try:
-        import inflect  # MIT-licensed, widely used for pluralization
-        engine = getattr(my_plural, "_inflect_engine", None)
-        if engine is None:
-            engine = inflect.engine()
-            my_plural._inflect_engine = engine
-
-        # plural_noun returns False when it can't/shouldn't pluralize
-        plural = engine.plural_noun(word)
-        if not plural:
-            plural = engine.plural(word)
+    try:  # MIT-licensed, widely used for pluralization
+        engine = _get_inflect_engine()
+        plural = engine.plural_noun(word, n) or engine.plural(word)
         if plural:
             return f"{n} {plural}"
     except Exception as e:
@@ -7092,7 +7134,7 @@ def interactive_flake8(options: Options,
     path = ensure_file(path)
     if logging.getLogger().isEnabledFor(logging.DEBUG): logging.debug("At the top of the function %s(), diff_choice=%s", return_method_name(), diff_choice)
     if ignore_codes is None:
-        ignore_codes: list[str] = []
+        ignore_codes = []
     if not run_flake8(options, path, ignore_codes=ignore_codes, max_line_length=max_line_length):
         logging.info("No flake8 errors—nothing to do.")
         return True
@@ -7455,7 +7497,7 @@ import univ_defs as ud
 __version__: str = "0.1.1"
 
 
-class Options():
+class Options:
     """Class that has all global options in one place."""
 
     def __init__(self) -> None:
