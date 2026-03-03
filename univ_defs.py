@@ -4576,7 +4576,9 @@ def human_bytesize(num: float | int | None, *, suffix: str = "B", si: bool = Fal
                              suffix is "B", "bytes" is appended in the output. Otherwise, the suffix is appended to the long name.
         si:                  If True, use powers of 1000 with SI prefixes (k, M, G, ... up to R, Q).
                              If False, use powers of 1024 with IEC prefixes (Ki, Mi, Gi, ... up to Ri, Qi).
-        precision:           Digits to show after the decimal point.
+        precision:           If >= 0, digits to show after the decimal point.
+                             If < 0, constrains the total returned string length to `-precision`
+                             (width-constrained mode; `long_units` is forced False).
         space:               If True, inserts a space between the number and the unit (ignored when long_units is True).
         trim_trailing_zeros: If True, removes trailing zeros and any dangling decimal point.
         long_units:          If True, spell out unit names ("bytes", "kibibytes", ... "quebibytes"/"quettabytes").
@@ -4592,8 +4594,8 @@ def human_bytesize(num: float | int | None, *, suffix: str = "B", si: bool = Fal
     """
     if num is None:
         return "None"
-    if precision < 0:
-        raise ValueError("precision must be non-negative")
+    # precision >= 0: decimal places mode
+    # precision < 0: fixed total-width mode (handled below)
     if suffix and not isinstance(suffix, str):
         suffix = str(suffix)
     step = 1000.0 if si else 1024.0
@@ -4615,8 +4617,44 @@ def human_bytesize(num: float | int | None, *, suffix: str = "B", si: bool = Fal
         n /= step
         i += 1
 
+    # Width-constrained mode: precision = -N means total output width must be N.
+    if precision < 0:
+        long_units = False  # forced off in width-constrained mode
+        total_width = -precision
+
+        sep = " " if space else ""
+        unit = f"{symbols[i]}{suffix}"
+
+        # Remaining width available for the numeric portion (including sign/decimal point)
+        numeric_width = total_width - len(sep) - len(unit)
+        if numeric_width <= 0:
+            raise ValueError(
+                f"precision={precision} is too small: no room for numeric part "
+                f"(unit='{unit}', space={space})"
+            )
+
+        # Fit the numeric part into numeric_width, maximizing decimals.
+        # Right-justify so decimal points line up across values of the same width.
+        for dec in range(numeric_width, -1, -1):
+            s_num = f"{n:.{dec}f}"
+            if trim_trailing_zeros and "." in s_num:
+                s_num = s_num.rstrip("0").rstrip(".")
+
+            candidate_num = f"{sign}{s_num}"
+            if len(candidate_num) <= numeric_width:
+                return f"{candidate_num.rjust(numeric_width)}{sep}{unit}"
+
+        # Even integer form doesn't fit (e.g., 1023 MiB into a 3-char numeric field).
+        s_int = f"{n:.0f}"
+        min_needed = len(sign) + len(s_int) + len(sep) + len(unit)
+        raise ValueError(
+            f"precision={precision} is too small for this value; "
+            f"need at least {-min_needed} or less (space={space}, si={si})"
+        )
+
     s = f"{n:.{precision}f}"
-    if trim_trailing_zeros:
+
+    if trim_trailing_zeros and "." in s:
         s = s.rstrip("0").rstrip(".")
 
     if long_units:
