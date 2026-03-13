@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Written by Emmy Killett (she/her), ChatGPT 4o (it/its), ChatGPT o1-preview (it/its), ChatGPT o3-mini-high (it/its), ChatGPT o4-mini-high (it/its), ChatGPT 5 Thinking (it/its), and GitHub Copilot (it/its).
+# Written by Emmy Killett
 from __future__         import annotations  # For Python 3.7+ compatibility with type annotations
 import os
 import sys
@@ -16,17 +16,12 @@ import errno
 import re  # Used to precompile regexes for performance
 
 # Version of univ_defs.py:
-__version__: Final[str] = "0.2.1"
+__version__: Final[str] = "0.2.2"
 
 # Version of python which should be used in scripts that import this module.
 # Python 3.12 is supported until 2028-10. https://devguide.python.org/versions/
 # The next version (Python 3.13) will leave the bugfix phase around 2026-10.
 PY_VERSION: Final[float] = 3.12
-
-# Further down, this COMPUTER_NAME is obtained by calling get_computer_name().
-# Then IS_NASA_COMPUTER is set based on whether COMPUTER_NAME starts with any of NASA_COMPUTER_NAME_PREFIXES.
-# JPL computers often have names starting with "MT" which stands for "ManTech"
-NASA_COMPUTER_NAME_PREFIXES: Final[tuple[str, ...]] = ("RAYL", "NASA", "JPL", "MT")  # NASA computers start with these prefixes and can only use "cleared" LLMs.
 
 # Default encoding used for reading and writing text files:
 DEFAULT_ENCODING: str = "utf-8"
@@ -746,7 +741,11 @@ def analyze_computer_name_results(results: dict[str, str], rawlog: bool = False)
 
 
 COMPUTER_NAME: str = get_computer_name(rawlog=True)
-NASA_CASEFOLDED_COMPUTER_NAME_PREFIXES: Final[tuple[str, ...]] = tuple(p.casefold() for p in NASA_COMPUTER_NAME_PREFIXES)
+# NASA computers start with these prefixes and can only use "cleared" LLMs.
+# JPL computers often have names starting with "MT" which stands for "ManTech"
+NASA_COMPUTER_NAME_PREFIXES:            Final[tuple[str, ...]] = ("RAYL", "NASA", "JPL", "MT")
+NASA_CASEFOLDED_COMPUTER_NAME_PREFIXES: Final[tuple[str, ...]] = tuple(p.casefold() for p in
+                                                                       NASA_COMPUTER_NAME_PREFIXES)
 IS_NASA_COMPUTER: bool = COMPUTER_NAME.casefold().startswith(NASA_CASEFOLDED_COMPUTER_NAME_PREFIXES)
 
 
@@ -5219,6 +5218,9 @@ _JD_MJD_CAPTURE_RE: re.Pattern = re.compile(r"\s*(?P<prefix>JD|MJD)?\s*(?P<value
 # This regex is used to check if a string has an explicit offset or Z at the end (indicating that the date should be converted by shifting the clock):
 _OFFSET_IN_STR_RE: re.Pattern  = re.compile(r"(Z|[+-]\d{2}:\d{2}|[+-]\d{4})$")
 
+# Julian Date at 1970-01-01T00:00:00 UTC
+_JD_UNIX_EPOCH: float = 2_440_587.5
+
 # Enclose the type alias annotation in quotes because not all of these types have been imported yet.
 AnyDateTimeType: TypeAlias = "str | float | int | np.datetime64 | pd.Timestamp | dt.datetime"
 
@@ -5347,7 +5349,6 @@ def parse_datetime(given_date: AnyDateTimeType, timezone: str | dt.tzinfo | None
     Raises:
         ValueError:  If the given_date cannot be parsed into a datetime object, or if the timezone is invalid.
         TypeError:   If the given_date is not a string, float, int, numpy.datetime64, pandas.Timestamp, or datetime.datetime object.
-        ImportError: If the 'jdcal' library is not installed and the given_date is a Julian Date or Modified Julian Date.
     """
     import datetime as dt
     fallback_logging_config()  # Ensure logging is configured
@@ -5377,12 +5378,6 @@ def parse_datetime(given_date: AnyDateTimeType, timezone: str | dt.tzinfo | None
 
     # Trigger JD/MJD branch only if format_str equals "JD" or "MJD", or prefix was provided
     if parsed_dt is None and (prefix is not None or (format_str and (format_str.upper() == "JD" or format_str.upper() == "MJD"))):
-
-        try:
-            import jdcal
-        except ImportError:
-            raise ImportError("The jdcal python library is required to parse Julian/MJD dates")
-
         # Determine raw value
         if isinstance(given_date, (int, float)):
             value = float(given_date)
@@ -5398,23 +5393,10 @@ def parse_datetime(given_date: AnyDateTimeType, timezone: str | dt.tzinfo | None
         # Determine if MJD conversion needed
         use_mjd = bool((format_str and format_str.upper() == "MJD") or (prefix and prefix.upper() == "MJD"))
 
-        # Convert MJD to JD if necessary
-        jd_val = value + (2_400_000.5 if use_mjd else 0.0)
-
-        # Split into integer day and fraction
-        int_part                   = int(jd_val)
-        frac_part                  = jd_val - int_part
-        year, month, day, day_frac = jdcal.jd2gcal(int_part, frac_part)
-
-        # Convert day fraction to hours, minutes, seconds, microseconds
-        day_int     = int(day)
-        frac_of_day = (day + day_frac) - day_int
-        hours       = int(frac_of_day * 24)
-        mins        = int((frac_of_day * 24 - hours) * 60)
-        secs_frac   = (frac_of_day * 24 - hours) * 60 - mins
-        secs        = int(secs_frac * 60)
-        micros      = int((secs_frac * 60 - secs) * 1e6)
-        parsed_dt   = dt.datetime(year, month, day_int, hours, mins, secs, micros, tzinfo=dt.timezone.utc)
+        # Convert MJD to JD if necessary, then to datetime via timedelta from Unix epoch
+        jd_val    = value + (2_400_000.5 if use_mjd else 0.0)
+        unix_secs = (jd_val - _JD_UNIX_EPOCH) * 86_400
+        parsed_dt = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(seconds=unix_secs)
 
     # Check if the given_date is a string that can be parsed as a float
     if parsed_dt is None and isinstance(given_date, str) and is_float(given_date):
@@ -5485,7 +5467,11 @@ def parse_datetime(given_date: AnyDateTimeType, timezone: str | dt.tzinfo | None
     if parsed_dt is None and not isinstance(given_date, str):
         raise TypeError(error_message)
 
-    # From here on, we know it's a str (we raised otherwise)
+    if parsed_dt is not None:
+        # Finalize the datetime object by converting it to the target timezone or just attaching the timezone without shifting the clock
+        return _finalize_datetime(parsed_dt, given_date, format_str, parsed_tz, should_convert)
+
+    # From here on, we know it's a str (we raised or otherwise handled non-str types above)
     assert isinstance(given_date, str)
     given_string = given_date
 
