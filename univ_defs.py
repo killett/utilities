@@ -83,7 +83,7 @@ class Options:
         self.additional_alias_files: list[Path] = []
         self.rawlog:                       bool = False
         self.bugbear_choice:         str | None = None  # set by run_flake8() if bugbear is installed.
-        self.args:    argparse.Namespace | None = None
+        self.args:           argparse.Namespace = argparse.Namespace()
 
 
 class PlotOptions(Options):
@@ -399,7 +399,7 @@ def my_fopen(file_path: str | os.PathLike[str],
 
     Args:
         file_path:       Path to the file to read.
-        suppress_errors: If True, suppress error messages and return False instead of logging errors.
+        suppress_errors: If True, suppress error messages by logging them as info instead of as error.
         rawlog:          If True, use a simple log format without timestamps or levels.
         numlines:        If specified, read only this many lines from the file and return them as a string.
         verbose:         If True, log messages about the file reading process (default: True).
@@ -421,28 +421,28 @@ def my_fopen(file_path: str | os.PathLike[str],
             if not rawlog:
                 if not suppress_errors: logging.error(this_message)
                 else:                   logging.info( this_message)
-        return False
+        return None
     if not safe_is_file(file_path):
         if verbose:
             this_message = f"Path is a directory, not a file: {os.fspath(file_path)}"
             if not rawlog:
                 if not suppress_errors: logging.error(this_message)
                 else:                   logging.info( this_message)
-        return False
+        return None
     if (file_path_size := safe_size(file_path)) is None:
         if verbose:
             this_message = f"Could not determine file size: {os.fspath(file_path)}"
             if not rawlog:
                 if not suppress_errors: logging.error(this_message)
                 else:                   logging.info( this_message)
-        return False
+        return None
     if file_path_size == 0:
         if verbose:
             this_message = f"File is empty: {os.fspath(file_path)}"
             if not rawlog:
                 if not suppress_errors: logging.error(this_message)
                 else:                   logging.info( this_message)
-        return False
+        return None
     # Does the file extension match any of these (non-text) extensions?
     casefolded_suffix = file_path.suffix.casefold()
     if casefolded_suffix in VIDEO_EXTENSIONS_SET:
@@ -450,25 +450,25 @@ def my_fopen(file_path: str | os.PathLike[str],
             this_message = f"Skipping video file {os.fspath(file_path)}"
             if not suppress_errors: logging.error(this_message)
             else:                   logging.info( this_message)
-        return False
+        return None
     if casefolded_suffix in AUDIO_EXTENSIONS_SET:
         if verbose and not rawlog:
             this_message = f"Skipping audio file {os.fspath(file_path)}"
             if not suppress_errors: logging.error(this_message)
             else:                   logging.info( this_message)
-        return False
+        return None
     if casefolded_suffix in IMAGE_EXTENSIONS_SET:
         if verbose and not rawlog:
             this_message = f"Skipping image file {os.fspath(file_path)}"
             if not suppress_errors: logging.error(this_message)
             else:                   logging.info( this_message)
-        return False
+        return None
     if casefolded_suffix in ARCHIVE_EXTENSIONS_SET:
         if verbose and not rawlog:
             this_message = f"Skipping archive file {os.fspath(file_path)}"
             if not suppress_errors: logging.error(this_message)
             else:                   logging.info( this_message)
-        return False
+        return None
     for encoding in TEXT_ENCODINGS:  # use the (ordered) tuple so more common encodings are tried first.
         try:
             with open(file_path, "r", encoding=encoding) as file:
@@ -495,8 +495,8 @@ def my_fopen(file_path: str | os.PathLike[str],
                 this_message = f"Error reading file {os.fspath(file_path)} with encoding {encoding}."
                 if not suppress_errors: logging.error(this_message, exc_info=True)
                 else:                   logging.info( this_message, exc_info=True)
-            return False
-    return False
+            return None
+    return None
 
 
 def return_method_name(levels_up: int = 1) -> str:
@@ -5732,13 +5732,13 @@ def from_jsonable(obj: Any) -> Any:
             return obj.get("name")
     if t == "datetime":
         import datetime as dt
-        return dt.datetime.fromisoformat(obj.get("value"))
+        return dt.datetime.fromisoformat(obj.get("value", ""))
     if t == "date":
         import datetime as dt
-        return     dt.date.fromisoformat(obj.get("value"))
+        return     dt.date.fromisoformat(obj.get("value", ""))
     if t == "time":
         import datetime as dt
-        return     dt.time.fromisoformat(obj.get("value"))
+        return     dt.time.fromisoformat(obj.get("value", ""))
     if t == "decimal":
         try:
             from decimal import Decimal
@@ -6234,6 +6234,8 @@ def _make_format_checker() -> Type[Any]:
         - missing docstring or incorrect docstring quote style
         """
 
+        _DocNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+
         def __init__(self, source: str, doc_style: str = "None") -> None:
             """Initialize the FormatChecker with the source code string."""
             self.source = source
@@ -6266,7 +6268,8 @@ def _make_format_checker() -> Type[Any]:
                     return elt  # type: ignore
             return None
 
-        def _check_function(self, node: ast.FunctionDef, *, in_method: bool = False, container: str | None = None) -> None:
+        def _check_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, *,
+                            in_method: bool = False, container: str | None = None) -> None:
             """Check a function or method node for formatting violations.
             If 'in_method' is True, it indicates that this is a method (e.g. inside a class).
             If 'container' is provided, it indicates the context (e.g. class name)."""
@@ -6292,7 +6295,7 @@ def _make_format_checker() -> Type[Any]:
                                     "missing type hints for " + ", ".join(missing),
                                     node.lineno))
 
-        def _check_docstring(self, node: ast.AST, who: str) -> None:
+        def _check_docstring(self, node: _DocNode, who: str) -> None:
             """
             Check a node for a docstring and its formatting.
             An error is added to self.errors if:
@@ -6336,7 +6339,7 @@ def _make_format_checker() -> Type[Any]:
             # Check the docstring style
             self._check_docstring_style(node, who)
 
-        def _check_docstring_style(self, node: ast.AST, who: str) -> None:
+        def _check_docstring_style(self, node: _DocNode, who: str) -> None:
             """Dispatch to the style‑specific docstring checker."""
             if not self.doc_style or self.doc_style.casefold() == "none":
                 return
@@ -6349,7 +6352,7 @@ def _make_format_checker() -> Type[Any]:
             if checker is not None:
                 checker(node, who)
 
-        def _check_google_docstring(self, node: ast.AST, who: str) -> None:
+        def _check_google_docstring(self, node: _DocNode, who: str) -> None:
             """
             Very basic Google‑style docstring validator:
             - must have a 'Args:' and 'Returns:' section header
@@ -6395,7 +6398,7 @@ def _make_format_checker() -> Type[Any]:
                 self.errors.append((node.__class__.__name__.casefold(), who,
                                     f"{doctype} docstring missing parameter(s): " + ", ".join(missing), node.lineno))
 
-        def _check_numpy_docstring(self, node: ast.AST, who: str) -> None:
+        def _check_numpy_docstring(self, node: _DocNode, who: str) -> None:
             """
             Very basic NumPy‑style docstring validator:
             - must have a 'Parameters' and 'Returns' section header
@@ -6563,7 +6566,7 @@ def run_flake8(options: Options, path: str | os.PathLike[str],
         options.bugbear_choice = None
     fallback_logging_config()
     if ignore_codes is None:
-        ignore_codes: list[str] = []
+        ignore_codes = []
     if not isinstance(ignore_codes, list):
         raise TypeError("'ignore_codes' must be a list of strings.")
     if not all(isinstance(code, str) for code in ignore_codes):
@@ -7245,7 +7248,6 @@ def multireplace(options: Options, verbose: bool = True) -> None:
         NotADirectoryError: If the specified path is not a directory.
     """
     fallback_logging_config()
-    assert options.args is not None  # to appease mypy
     try:
         _validate_glob_pattern(options.args.glob_pattern)
     except Exception as e:
@@ -7421,7 +7423,7 @@ class Options:
         """Initialize the Options class with default values."""
         self.my_name:  str = Path(sys.argv[0]).stem  # The invoked name of this script without the .py extension
         self.log_mode: int = logging.INFO  # Use the -debug command line argument to change to DEBUG.
-        self.args: argparse.Namespace | None = None
+        self.args: argparse.Namespace = argparse.Namespace()
         self.default_dir: Path = Path.cwd().expanduser().resolve(strict=True)  # Default to current working directory
 
 
@@ -7494,7 +7496,7 @@ class Options:
         """Initialize the Options class with default values."""
         self.my_name:  str = Path(sys.argv[0]).stem  # The invoked name of this script without the .py extension
         self.log_mode: int = logging.INFO  # Use the -debug command line argument to change to DEBUG.
-        self.args: argparse.Namespace | None = None
+        self.args: argparse.Namespace = argparse.Namespace()
         self.default_dir: Path = Path.cwd().expanduser().resolve(strict=True)  # Default to current working directory
 
 
@@ -7559,7 +7561,7 @@ class Options:
         """Initialize the Options class with default values."""
         self.my_name:  str = Path(sys.argv[0]).stem  # The invoked name of this script without the .py extension
         self.log_mode: int = logging.INFO  # Use the -debug command line argument to change to DEBUG.
-        self.args: argparse.Namespace | None = None
+        self.args: argparse.Namespace = argparse.Namespace()
         self.default_glob_pattern: str = "*"
         self.default_dir: Path = Path.cwd().expanduser().resolve(strict=True)  # Default to current working directory
 
@@ -7627,7 +7629,7 @@ class Options:
         self.default_exclude_dirs:  set[str] = set(ud.DEFAULT_EXCLUDE_DIRS)
         self.default_dir:               Path = Path.cwd().expanduser().resolve(strict=True)  # Default to current working directory
         self.log_mode:                   int = logging.INFO  # Use the -debug command line argument to change to DEBUG.
-        self.args: argparse.Namespace | None = None
+        self.args: argparse.Namespace = argparse.Namespace()
 
 
 def parse_arguments(options: Options) -> None:
@@ -7696,7 +7698,7 @@ class Options:
         self.my_name:                    str = Path(sys.argv[0]).stem  # The invoked name of this script without the extension
         self.default_exclude_dirs:  set[str] = set(ud.DEFAULT_EXCLUDE_DIRS)
         self.log_mode:                   int = logging.INFO  # Use -debug to change to logging.DEBUG.
-        self.args: argparse.Namespace | None = None
+        self.args: argparse.Namespace = argparse.Namespace()
 
 
 def parse_arguments(options: Options) -> None:
@@ -8983,6 +8985,8 @@ def get_video_duration_seconds(path: str | os.PathLike[str],
     if not safe_is_file(p):
         raise FileNotFoundError(f"No such file: {os.fspath(p)}")
 
+    data: dict[str, Any] = {}
+
     def _run(cmd: list[str]) -> tuple[int, str, str]:
         """Helper: run a subprocess safely"""
         proc = subprocess.run(cmd,
@@ -9007,7 +9011,7 @@ def get_video_duration_seconds(path: str | os.PathLike[str],
         rc, out, err = _run(cmd_ffprobe)
         if rc == 0 and out.strip():
             try:
-                data: dict[str, Any] = json.loads(out)
+                data = json.loads(out)
                 # Preferred: container-level duration
                 dur_str: str | None = None
                 if isinstance(data.get("format"), dict):
@@ -9053,7 +9057,7 @@ def get_video_duration_seconds(path: str | os.PathLike[str],
         rc, out, err = _run(cmd_mediainfo)
         if rc == 0 and out.strip():
             try:
-                data: dict[str, Any] = json.loads(out)
+                data   = json.loads(out)
                 media  = data.get("media", {})
                 tracks = media.get("track", [])
                 if isinstance(tracks, list):
@@ -9124,7 +9128,7 @@ def extract_and_concatenate_segments(input_file: str | os.PathLike[str],
     if type(output_name_or_path) is str:
         output_path = input_dir / output_name_or_path
     else:
-        output_path = output_name_or_path
+        output_path = ensure_path(output_name_or_path)
     ffmpeg_path_str = find_ffmpeg()
     if not ffmpeg_path_str:
         raise RuntimeError("ffmpeg is not installed or not found in PATH. Please install ffmpeg to use this function.")
