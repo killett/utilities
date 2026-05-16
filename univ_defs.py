@@ -16,11 +16,12 @@ import errno
 import re  # Used to precompile regexes for performance
 
 # Version of univ_defs.py:
-__version__: Final[str] = "0.2.2"
+__version__: Final[str] = "0.2.3"
 
 # Version of python which should be used in scripts that import this module.
 # Python 3.12 is supported until 2028-10. https://devguide.python.org/versions/
 # The next version (Python 3.13) will leave the bugfix phase around 2026-10.
+# Also need to update this in pyproject.toml and pixi.toml if this is changed.
 PY_VERSION: Final[float] = 3.12
 
 # Default encoding used for reading and writing text files:
@@ -4936,8 +4937,9 @@ def format_date_range(date1: dt.datetime, date2: dt.datetime | None = None) -> s
         date2: The second date as a datetime.datetime object. If None, defaults to date1.
 
     Returns:
-        A formatted string representing the date range, such as 'Jan  7, 2025' or 'Jan  7 - Feb  3, 2025'.
-        If both dates are the same, it returns just one date like 'Jan  7, 2025'.
+        A formatted string representing the date range, such as 'Jan  7, 2025' or 'Jan  7 - Feb  3, 2025' or 'Jan  7 - 15, 2025'.
+        If both dates and times are the same, it returns just one date like 'Jan  7, 2025'.
+        If both dates are the same but times are different, it returns a string like '06:04:02 - 19:05:39 on Jan  7, 2025'
 
     Raises:
         ValueError: If either date1 or date2 is not a datetime.datetime object.
@@ -4968,10 +4970,18 @@ def format_date_range(date1: dt.datetime, date2: dt.datetime | None = None) -> s
 
     if year1 == year2:
         if month1 == month2:
-            if day1 == day2: return f"{month1} {day1:2d}, {year1}"
-            else:            return f"{month1} {day1:2d} - {day2:2d}, {year1}"
-        else:                return f"{month1} {day1:2d} - {month2} {day2:2d}, {year1}"
-    else: return f"{month1} {day1:2d}, {year1} - {month2} {day2:2d}, {year2}"
+            if day1 == day2:
+                time1 = date1.strftime("%H:%M:%S")
+                time2 = date2.strftime("%H:%M:%S")
+                if time1 == time2:
+                    return f"{month1} {day1:2d}, {year1}"
+                return     f"{time1} - {time2} on {month1} {day1:2d}, {year1}"
+            else:
+                return     f"{month1} {day1:2d} - {day2:2d}, {year1}"
+        else:
+            return         f"{month1} {day1:2d} - {month2} {day2:2d}, {year1}"
+    else:
+        return             f"{month1} {day1:2d}, {year1} - {month2} {day2:2d}, {year2}"
 
 
 _TIMESTAMP_PATTERN_RE: re.Pattern = re.compile(r"(\d{8}-\d{6}).pkl$")
@@ -5548,6 +5558,203 @@ def parse_datetime(given_date: AnyDateTimeType, timezone: str | dt.tzinfo | None
         return _finalize_datetime(parsed_dt, given_string, format_str, parsed_tz, should_convert)
 
     raise ValueError(error_message + "\n".join(map(str, errors)) + "\nPlease check the input format and try again.")
+
+
+# ── Adaptive Date Formatting ─────────────────────────────────────────────────
+#
+# Modular utilities for formatting date tick labels at the coarsest precision
+# that still produces unique labels. Works with matplotlib axes, colorbars,
+# or anywhere date strings are needed.
+
+
+class Precision:
+    """Integer constants representing date-formatting precision levels.
+
+    Levels are ordered from coarsest (YEAR=0) to finest (SECOND=4).
+    """
+
+    YEAR:   Final[int] = 0
+    MONTH:  Final[int] = 1
+    DAY:    Final[int] = 2
+    MINUTE: Final[int] = 3
+    SECOND: Final[int] = 4
+
+
+ADAPTIVE_FORMAT_LEVELS: Final[list[str]] = [
+    "%Y",                 # 0: year     (2024)
+    "%Y-%m",              # 1: month    (2024-03)
+    "%Y-%m-%d",           # 2: day      (2024-03-15)
+    "%Y-%m-%d %H:%M",     # 3: minute   (2024-03-15 09:30)
+    "%Y-%m-%d %H:%M:%S",  # 4: second   (2024-03-15 09:30:45)
+]
+
+
+def _normalize_to_datetime(date: AnyDateTimeType) -> "dt.datetime | None":
+    """Convert a single date value to datetime.datetime.
+
+    Accepts datetime.datetime, numpy.datetime64, and matplotlib date floats.
+    Returns None for NaT/NaN values.
+
+    Args:
+        date: A date value in any supported format.
+
+    Returns:
+        A datetime.datetime object, or None if the value is NaT/NaN.
+    """
+    import datetime as dt
+    import numpy as np
+
+    if isinstance(date, dt.datetime):
+        return date
+    if isinstance(date, (int, float)):
+        if np.isnan(date):
+            return None
+        import matplotlib.dates as mdates
+        return mdates.num2date(date).replace(tzinfo=None)
+    if isinstance(date, np.datetime64):
+        if np.isnat(date):
+            return None
+        ts = (date - np.datetime64("1970-01-01T00:00:00")) / np.timedelta64(1, "s")
+        return dt.datetime.fromtimestamp(float(ts), tz=dt.timezone.utc).replace(tzinfo=None)
+    msg = f"Unsupported date type: {type(date)}"
+    raise TypeError(msg)
+
+
+def adaptive_date_labels(
+    dates: "Sequence[AnyDateTimeType]",
+    *,
+    min_precision: int = Precision.YEAR,
+    max_precision: int = Precision.SECOND,
+    format_levels: "list[str] | None" = None,
+) -> list[str]:
+    """Format dates at the coarsest precision that produces unique labels.
+
+    Given a sequence of dates, starts formatting at the coarsest level and
+    refines until all labels are unique or max_precision is reached.
+
+    Args:
+        dates: Sequence of date values (datetime.datetime, numpy.datetime64,
+            or matplotlib date floats).
+        min_precision: Minimum precision level (default: Precision.YEAR).
+            The formatter will never produce labels coarser than this.
+        max_precision: Maximum precision level (default: Precision.SECOND).
+            The formatter stops refining at this level even if labels collide.
+        format_levels: Custom format strings for each level. Must have length
+            >= max_precision + 1. Defaults to ADAPTIVE_FORMAT_LEVELS.
+
+    Returns:
+        List of formatted date strings, one per input date. Empty strings
+        for NaT/NaN values.
+    """
+    import numpy as np
+
+    if isinstance(dates, np.ndarray):
+        if dates.size == 0:
+            return []
+    elif not dates:
+        return []
+
+    levels = format_levels if format_levels is not None else ADAPTIVE_FORMAT_LEVELS
+
+    normalized = [_normalize_to_datetime(d) for d in dates]
+
+    if len(normalized) == 1:
+        d = normalized[0]
+        level = max(min_precision, Precision.DAY)
+        level = min(level, max_precision)
+        if d is None:
+            return [""]
+        return [d.strftime(levels[level])]
+
+    for level in range(min_precision, max_precision + 1):
+        fmt = levels[level]
+        labels = [d.strftime(fmt) if d is not None else "" for d in normalized]
+        non_empty = [lbl for lbl in labels if lbl != ""]
+        if len(set(non_empty)) == len(non_empty):
+            return labels
+
+    fmt = levels[max_precision]
+    return [d.strftime(fmt) if d is not None else "" for d in normalized]
+
+
+class AdaptiveDateFormatter:
+    """Matplotlib Formatter that auto-selects date label precision.
+
+    Uses adaptive disambiguation: labels start at the coarsest level and
+    refine until all tick labels are unique. Drop-in replacement for any
+    matplotlib axis formatter or colorbar formatter.
+
+    Args:
+        min_precision: Minimum precision level (default: Precision.YEAR).
+        max_precision: Maximum precision level (default: Precision.SECOND).
+        format_levels: Custom format strings per level.
+
+    Example:
+        >>> ax.xaxis.set_major_formatter(AdaptiveDateFormatter())
+        >>> cbar.ax.yaxis.set_major_formatter(AdaptiveDateFormatter())
+    """
+
+    def __init__(
+        self,
+        *,
+        min_precision: int = Precision.YEAR,
+        max_precision: int = Precision.SECOND,
+        format_levels: "list[str] | None" = None,
+    ) -> None:
+        """Initialize the AdaptiveDateFormatter.
+
+        Args:
+            min_precision: Minimum precision level.
+            max_precision: Maximum precision level.
+            format_levels: Custom format strings per level.
+        """
+        import matplotlib.ticker as mticker  # noqa: F401
+        self._min_precision = min_precision
+        self._max_precision = max_precision
+        self._format_levels = format_levels
+        self._formatter = mticker.Formatter.__new__(mticker.Formatter)
+        self._cached_labels: dict[float, str] = {}
+
+    def format_ticks(self, values: list[float]) -> list[str]:
+        """Format all tick values collectively with disambiguation.
+
+        Args:
+            values: List of matplotlib date floats (from date2num).
+
+        Returns:
+            List of formatted label strings.
+        """
+        labels = adaptive_date_labels(
+            values,
+            min_precision=self._min_precision,
+            max_precision=self._max_precision,
+            format_levels=self._format_levels,
+        )
+        self._cached_labels = dict(zip(values, labels))
+        return labels
+
+    def __call__(self, x: float, pos: "int | None" = None) -> str:
+        """Format a single tick value.
+
+        Uses cached results from format_ticks if available, otherwise
+        formats independently at the day level.
+
+        Args:
+            x: A matplotlib date float.
+            pos: Tick position (unused, required by matplotlib protocol).
+
+        Returns:
+            Formatted date string.
+        """
+        if x in self._cached_labels:
+            return self._cached_labels[x]
+        labels = adaptive_date_labels(
+            [x],
+            min_precision=self._min_precision,
+            max_precision=self._max_precision,
+            format_levels=self._format_levels,
+        )
+        return labels[0] if labels else ""
 
 
 def to_jsonable(obj: Any, *, roundtrip: bool = True) -> Any:
@@ -8813,8 +9020,8 @@ def set_system_volume(percent: int, tolerance: int = 1,
                 actual = int(round(avg * 100))
                 if abs(actual - percent) > tolerance:
                     raise RuntimeError(f"[pulsectl] Expected {percent}%, but got {actual}%")
+                state = "muted" if sink_after.mute else "unmuted"
                 if mute_arg is not None and sink_after.mute != mute_arg:
-                    state = "muted" if sink_after.mute else "unmuted"
                     raise RuntimeError(f"Mute verify failed: got {state}")
                 logging.info("[pulsectl] Volume set to %d%%, %s", actual, state)
                 return  # Successfully set volume and verified
