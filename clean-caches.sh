@@ -142,6 +142,19 @@ warn_path() {
     printf 'or re-run with --add-to-path to do it automatically.\n' >&2
 }
 
+# Remind the user to refresh the current shell's command cache so a just-linked
+# command is found by name / tab-completion without opening a new shell. Keyed
+# to the shell (zsh: rehash, bash: hash -r), not the OS.
+rehash_hint() {
+    local shell_base
+    shell_base=$(basename -- "${SHELL:-}" 2>/dev/null || true)
+    case "$shell_base" in
+        zsh)  printf 'Run: rehash   (or open a new terminal) so your shell finds it now.\n' >&2 ;;
+        bash) printf 'Run: hash -r  (or open a new terminal) so your shell finds it now.\n' >&2 ;;
+        *)    printf 'Open a new terminal so your shell finds it now.\n' >&2 ;;
+    esac
+}
+
 # Append a PATH entry for $1 to PATH_FIX_FILE (idempotent).
 write_path_entry() {
     local dir="$1" rcfile="$PATH_FIX_FILE"
@@ -290,6 +303,7 @@ install_self() {
         if [[ "$cur" == "$script_path" ]]; then
             printf 'Already installed: %s -> %s\n' "$link_path" "$script_path" >&2
             handle_path "$chosen" "$on_path" "$mode"
+            if [[ "$dry_run" != true && "$on_path" == true ]]; then rehash_hint; fi
             return 0
         fi
         die "$link_path already exists (link to $cur); remove it or install elsewhere."
@@ -317,6 +331,7 @@ install_self() {
     $sudo_prefix ln -s -- "$script_path" "$link_path" || die "failed to create symlink $link_path"
     printf 'Installed: %s -> %s\n' "$link_path" "$script_path" >&2
     handle_path "$chosen" "$on_path" apply
+    if [[ "$on_path" == true ]]; then rehash_hint; fi
 }
 
 # --- Search backend (uses globals: fd_bin, search_root) --------------------
