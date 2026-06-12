@@ -145,7 +145,7 @@ warn_path() {
 # Append a PATH entry for $1 to PATH_FIX_FILE (idempotent).
 write_path_entry() {
     local dir="$1" rcfile="$PATH_FIX_FILE"
-    if [[ -f "$rcfile" ]] && grep -qF -- "$dir" "$rcfile"; then
+    if [[ -f "$rcfile" ]] && grep -qF -- "\"$dir:" "$rcfile"; then
         printf 'PATH entry for %s already present in %s\n' "$dir" "$rcfile" >&2
     else
         {
