@@ -22,10 +22,15 @@ set -euo pipefail
 # --- Configuration ---------------------------------------------------------
 # Directory names to remove. Matched as exact basenames, at any depth.
 delete_these=(
+    # Tool caches (cheap to regenerate).
     .mypy_cache
     .pytest_cache
-    .pixi
     .ruff_cache
+    __pycache__
+    # Environments (deleting these means a full reinstall, not a cheap rebuild).
+    .pixi
+    .venv
+    venv
 )
 
 prog=${0##*/}
