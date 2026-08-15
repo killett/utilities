@@ -119,7 +119,7 @@ def run_download(options: Options) -> None:
     """
     url: str = options.args.url
 
-    dest_path: Path = determine_destination_path(url, Path.cwd())
+    dest_path: Path = determine_destination_path(url, options.default_dest_dir)
 
     logging.debug("Current working directory: %s", os.fspath(Path.cwd()))
     logging.info("Preparing to download URL: %s", url)

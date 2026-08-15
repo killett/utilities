@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
+import logging
 import re
 from pathlib import Path
+
+import emmykit as ek
+import pytest
 
 import download_file
 
@@ -116,3 +121,45 @@ def test_destination_directory_argument_is_respected(tmp_path: Path) -> None:
 
     assert (a.parent.name, b.parent.name) == ("a", "b")
     assert a.name == b.name == "f.bin"
+
+
+def _options_for(url: str, dest_dir: Path) -> download_file.Options:
+    """Build an Options as parse_arguments() would leave it."""
+    options = download_file.Options()
+    options.default_dest_dir = dest_dir
+    options.args = argparse.Namespace(url=url, debug=False)
+    return options
+
+
+def test_download_is_delegated_with_the_derived_destination(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Catches swapped or mis-keyed arguments, and catches run_download
+    # reverting to Path.cwd() instead of the configured destination.
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(ek, "download_file", lambda **kw: calls.append(kw))
+
+    download_file.run_download(_options_for("https://example.com/f.bin", tmp_path))
+
+    assert calls == [
+        {
+            "url": "https://example.com/f.bin",
+            "dest": tmp_path / "f.bin",
+            "timeout": 10000,
+        }
+    ]
+
+
+def test_existing_destination_is_warned_about(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Catches silently overwriting a file the user already had. caplog works
+    # here because run_download is called directly, so basicConfig has not run.
+    (tmp_path / "f.bin").write_text("previous download", encoding="utf-8")
+    monkeypatch.setattr(ek, "download_file", lambda **kw: None)
+
+    with caplog.at_level(logging.WARNING):
+        download_file.run_download(_options_for("https://example.com/f.bin", tmp_path))
+
+    assert "already exists and will be overwritten" in caplog.text
+    assert str(tmp_path / "f.bin") in caplog.text
