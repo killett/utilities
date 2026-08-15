@@ -1,8 +1,8 @@
 import datetime as dt
-import numpy as np
-import pandas as pd
 
 import emmykit as ek
+import numpy as np
+import pandas as pd
 
 # Record exact time that this script starts running
 start_time = dt.datetime.now()
@@ -11,28 +11,28 @@ start_time = dt.datetime.now()
 # Tests of parse_timezone()
 ###############################
 
-print(f"{ek.parse_timezone('UTC') = }")       # → UTC+00:00
-print(f"{ek.parse_timezone('UTC+5') = }")     # → UTC+05:00
+print(f"{ek.parse_timezone('UTC') = }")  # → UTC+00:00
+print(f"{ek.parse_timezone('UTC+5') = }")  # → UTC+05:00
 print(f"{ek.parse_timezone('GMT-2:30') = }")  # → UTC−02:30
-print(f"{ek.parse_timezone('UTC+5h30m') = }") # → UTC+05:30
-print(f"{ek.parse_timezone('GMT+3') = }")     # → UTC+03:00
-print(f"{ek.parse_timezone('UTC-8h') = }")    # → UTC−08:00
+print(f"{ek.parse_timezone('UTC+5h30m') = }")  # → UTC+05:30
+print(f"{ek.parse_timezone('GMT+3') = }")  # → UTC+03:00
+print(f"{ek.parse_timezone('UTC-8h') = }")  # → UTC−08:00
 
 # parse_timezone edge cases
-print(f"{ek.parse_timezone('Z') = }")               # → UTC+00:00
-print(f"{ek.parse_timezone('utc') = }")             # case-insensitive
-print(f"{ek.parse_timezone('GMT+0000') = }")        # colonless offset
+print(f"{ek.parse_timezone('Z') = }")  # → UTC+00:00
+print(f"{ek.parse_timezone('utc') = }")  # case-insensitive
+print(f"{ek.parse_timezone('GMT+0000') = }")  # colonless offset
 print(f"{ek.parse_timezone('GMT+00:00') = }")
 print(f"{ek.parse_timezone('UTC-0530') = }")
 print(f"{ek.parse_timezone('utc+5h') = }")
-print(f"{ek.parse_timezone('gmt-4H15M') = }")       # mixed case, unit letters
-print(f"{ek.parse_timezone('+2') = }")              # bare +H
-print(f"{ek.parse_timezone('-11:45') = }")          # high negative offset
-print(f"{ek.parse_timezone('EST') = }")             # abbreviation → America/New_York
-print(f"{ek.parse_timezone('cSt') = }")             # ambiguous CST → America/Chicago
-print(f"{ek.parse_timezone('Asia/Kolkata') = }")    # IANA
+print(f"{ek.parse_timezone('gmt-4H15M') = }")  # mixed case, unit letters
+print(f"{ek.parse_timezone('+2') = }")  # bare +H
+print(f"{ek.parse_timezone('-11:45') = }")  # high negative offset
+print(f"{ek.parse_timezone('EST') = }")  # abbreviation → America/New_York
+print(f"{ek.parse_timezone('cSt') = }")  # ambiguous CST → America/Chicago
+print(f"{ek.parse_timezone('Asia/Kolkata') = }")  # IANA
 try:
-    print(ek.parse_timezone('Mars/Phobos'))
+    print(ek.parse_timezone("Mars/Phobos"))
 except Exception as e:
     print(f"Expected error for invalid zone: {e!r}")
 
@@ -40,7 +40,7 @@ except Exception as e:
 # Tests of parse_datetime()
 ###############################
 
-print(f"{ek.parse_datetime('2021-03-31T12:00:00Z') = }")       # → 2021-03-31 12:00:00+00:00
+print(f"{ek.parse_datetime('2021-03-31T12:00:00Z') = }")  # → 2021-03-31 12:00:00+00:00
 print(f"{ek.parse_datetime('2021-03-31T12:00:00+05:30') = }")  # → 2021-03-31 12:00:00
 
 print(f"{ek.parse_datetime('Jan 1, 2021') = }")  # → 2021-01-01 00:00:00+00:00
@@ -50,7 +50,7 @@ print(f"{ek.parse_datetime('31 Mar 2021 12:00:00') = }")
 print(f"{ek.parse_datetime('2021-03-31T12:00:00Z') = }")
 print(f"{ek.parse_datetime('2021-03-31T12:00:00+05:30') = }")
 print(f"{ek.parse_datetime('2021-03-31T12:00:00-08:00', timezone='PST') = }")
-print(f"{ek.parse_datetime('20210331T143000Z') = }")     # compact
+print(f"{ek.parse_datetime('20210331T143000Z') = }")  # compact
 print(f"{ek.parse_datetime('2021-03-31 14:30:00') = }")  # naive → attach UTC
 
 # Ordinals, commas, dots, slashes
@@ -90,12 +90,12 @@ print(f"{ek.parse_datetime(1000, format_str='hours since J2000') = }")
 print(f"{ek.parse_datetime(365,  format_str='days since 2020-01-01') = }")
 print(f"{ek.parse_datetime(2,    format_str='weeks since 2021-01-01') = }")
 try:
-    ek.parse_datetime(10,        format_str='lightyears since 2000-01-01')
+    ek.parse_datetime(10, format_str="lightyears since 2000-01-01")
 except Exception as e:
     print(f"Expected invalid unit error: {e!r}")
 
 # date-only vs datetime.datetime
-d     = dt.date(    2021, 7, 4)
+d = dt.date(2021, 7, 4)
 dtobj = dt.datetime(2021, 7, 4, 16, 30)
 print(f"{ek.parse_datetime(d, timezone='America/Los_Angeles') = }")
 print(f"{ek.parse_datetime(dtobj, timezone='UTC') = }")
@@ -104,42 +104,46 @@ print(f"{ek.parse_datetime(dtobj, timezone='UTC') = }")
 print(f"{ek.parse_datetime('2021-176') = }")  # 176th day of 2021 → June 25, 2021
 print(f"{ek.parse_datetime('2021-365') = }")  # 365th day of 2021 → December 31, 2021
 print(f"{ek.parse_datetime('2021-001') = }")  # 001st day of 2021
-print(f"{ek.parse_datetime('2021 32')  = }")   # 32nd day of 2021 → February 1, 2021
+print(f"{ek.parse_datetime('2021 32')  = }")  # 32nd day of 2021 → February 1, 2021
 
 # Julian and Modified Julian Dates
-print(f"{ek.parse_datetime('JD 2459396.5') = }")  # Julian Date 
-print(f"{ek.parse_datetime('2459396.5', format_str='JD') = }")  # Julian Date without prefix
+print(f"{ek.parse_datetime('JD 2459396.5') = }")  # Julian Date
+# Julian Date without prefix
+print(f"{ek.parse_datetime('2459396.5', format_str='JD') = }")
 print(f"{ek.parse_datetime('MJD 59396.0') = }")  # Modified Julian Date
 print(f"{ek.parse_datetime('59396.0', format_str='MJD') = }")  # MJD without prefix
 print(f"{ek.parse_datetime('JD 2451545.0') = }")  # J2000 epoch
 print(f"{ek.parse_datetime('MJD 51544.0') = }")  # MJD for J2000 epoch
 
-print(f"{ek.parse_datetime('J2000') = }")  # J2000 epoch → January 1, 2000, 11:58:55.816 UTC
+# J2000 epoch → January 1, 2000, 11:58:55.816 UTC
+print(f"{ek.parse_datetime('J2000') = }")
 print(f"{ek.parse_datetime('J2000', timezone='PST') = }")  # J2000 in PST timezone
 print(f"{ek.parse_datetime('UNIX') = }")
-print(f"{ek.parse_datetime('UNIX', timezone='AWST') = }")  # Unix epoch in Western Australia Standard Time
+# Unix epoch in Western Australia Standard Time
+print(f"{ek.parse_datetime('UNIX', timezone='AWST') = }")
 
 # numpy.datetime64 & pandas.Timestamp
-np_dt = np.datetime64('2021-08-15T20:45:00')
-pd_ts = pd.Timestamp( '2021-09-10 13:20')
+np_dt = np.datetime64("2021-08-15T20:45:00")
+pd_ts = pd.Timestamp("2021-09-10 13:20")
 print(f"{ek.parse_datetime(np_dt,    timezone='EST') = }")
 print(f"{ek.parse_datetime(pd_ts,    timezone='Europe/Berlin') = }")
-not_naive = ek.parse_datetime(np_dt, timezone='EST')
+not_naive = ek.parse_datetime(np_dt, timezone="EST")
 print(f"{not_naive = }")  # Should be timezone-aware
-print(f"{ek.parse_datetime(not_naive, timezone='naive') = }")  # Convert to naive datetime
+# Convert to naive datetime
+print(f"{ek.parse_datetime(not_naive, timezone='naive') = }")
 
-print(f"{ek.parse_datetime('2021') = }")     # Just a year → January 1, 2021
+print(f"{ek.parse_datetime('2021') = }")  # Just a year → January 1, 2021
 print(f"{ek.parse_datetime('2021-12') = }")  # Just a year and month → December 1, 2021
 
 # Invalid strings
-for bad in ['notadate', '32 Feb 2021', '2021-13-01']:
+for bad in ["notadate", "32 Feb 2021", "2021-13-01"]:
     try:
         print(ek.parse_datetime(bad))
     except Exception as e:
         print(f"Correctly failed on {bad!r}: {e!r}")
 
 # Out-of-range JD/MJD
-for bad in ['JD -2445.0', 'MJD -5144.0']:
+for bad in ["JD -2445.0", "MJD -5144.0"]:
     try:
         print(ek.parse_datetime(bad))
     except Exception as e:
