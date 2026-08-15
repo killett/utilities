@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import sys
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 import emmykit as ek
@@ -15,26 +15,25 @@ class Options:
 
     def __init__(self) -> None:
         """Initialize the Options class with default values."""
-        self.my_name:             str = Path(sys.argv[0]).stem
-        self.log_mode:            int = logging.INFO     # Use -debug to switch to DEBUG.
+        self.my_name: str = Path(sys.argv[0]).stem
+        self.log_mode: int = logging.INFO  # Use -debug to switch to DEBUG.
         self.args: argparse.Namespace = argparse.Namespace()
 
         # Concrete, user-tunable defaults:
-        self.timeout_per_step:  float =   2.5  # seconds per individual check
-        self.min_timeout:       float =   0.5  # minimum seconds per check
-        self.retries:             int =   1    # overall retries for the combined check
-        self.min_retries:         int =   0    # minimum retries
-        self.workers:             int =   6    # thread pool size for parallel attempts
-        self.min_workers:         int =   1    # minimum threads
-        self.include_ipv6:       bool = False  # attempt IPv6 endpoints too
-        self.strict:             bool = False  # require HTTP probe OR (TCP+DNS), not just raw TCP
-        self.ignore_proxies:     bool = False  # force direct HTTP (no env proxies)
-        self.exit_code:          bool =  True  # set exit code 0/1 based on result
+        self.timeout_per_step: float = 2.5  # seconds per individual check
+        self.min_timeout: float = 0.5  # minimum seconds per check
+        self.retries: int = 1  # overall retries for the combined check
+        self.min_retries: int = 0  # minimum retries
+        self.workers: int = 6  # thread pool size for parallel attempts
+        self.min_workers: int = 1  # minimum threads
+        self.include_ipv6: bool = False  # attempt IPv6 endpoints too
+        self.strict: bool = False  # require HTTP probe OR (TCP+DNS), not just raw TCP
+        self.ignore_proxies: bool = False  # force direct HTTP (no env proxies)
+        self.exit_code: bool = True  # set exit code 0/1 based on result
 
 
 def parse_arguments(options: Options) -> None:
-    """
-    Parse command-line arguments.
+    """Parse command-line arguments.
 
     Args:
         options: Options object to store parsed arguments. Contains:
@@ -59,23 +58,55 @@ def parse_arguments(options: Options) -> None:
     parser = argparse.ArgumentParser(
         description=f"Check internet availability using multiple strategies. {options.my_name} v{__version__}"
     )
-    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("-debug", "--debug", action="store_true",
-                        help="Enable debug logging.")
-    parser.add_argument("-t", "--timeout", type=float, default=options.timeout_per_step,
-                        help=f"Timeout (seconds) per individual check (default: {options.timeout_per_step}).")
-    parser.add_argument("-r", "--retries", type=int, default=options.retries,
-                        help=f"Number of full-check retries on failure (default: {options.retries}).")
-    parser.add_argument("-w", "--workers", type=int, default=options.workers,
-                        help=f"Thread pool size (default: {options.workers}).")
-    parser.add_argument("--ipv6",    dest="ipv6", action="store_true",  default=options.include_ipv6,
-                        help=f"Enable IPv6 checks (default: {options.include_ipv6}).")
-    parser.add_argument("--strict", action="store_true",
-                        help="Require stronger evidence: a successful HTTP probe OR (TCP + DNS).")
-    parser.add_argument("--ignore-proxies", action="store_true",
-                        help="Ignore HTTP(S) proxy environment variables during HTTP probes.")
-    parser.add_argument("--no-exit-code", action="store_true",
-                        help="Do not use exit status (always exit 0). Result still printed.")
+    parser.add_argument(
+        "-v", "--version", action="version", version=f"%(prog)s {__version__}"
+    )
+    parser.add_argument(
+        "-debug", "--debug", action="store_true", help="Enable debug logging."
+    )
+    parser.add_argument(
+        "-t",
+        "--timeout",
+        type=float,
+        default=options.timeout_per_step,
+        help=f"Timeout (seconds) per individual check (default: {options.timeout_per_step}).",
+    )
+    parser.add_argument(
+        "-r",
+        "--retries",
+        type=int,
+        default=options.retries,
+        help=f"Number of full-check retries on failure (default: {options.retries}).",
+    )
+    parser.add_argument(
+        "-w",
+        "--workers",
+        type=int,
+        default=options.workers,
+        help=f"Thread pool size (default: {options.workers}).",
+    )
+    parser.add_argument(
+        "--ipv6",
+        dest="ipv6",
+        action="store_true",
+        default=options.include_ipv6,
+        help=f"Enable IPv6 checks (default: {options.include_ipv6}).",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Require stronger evidence: a successful HTTP probe OR (TCP + DNS).",
+    )
+    parser.add_argument(
+        "--ignore-proxies",
+        action="store_true",
+        help="Ignore HTTP(S) proxy environment variables during HTTP probes.",
+    )
+    parser.add_argument(
+        "--no-exit-code",
+        action="store_true",
+        help="Do not use exit status (always exit 0). Result still printed.",
+    )
 
     options.args = parser.parse_args()
     if options.args.debug:
@@ -83,23 +114,28 @@ def parse_arguments(options: Options) -> None:
 
     # Update options from CLI
     if float(options.args.timeout) < options.min_timeout:
-        logging.warning(f"requested timeout < minimum ({options.min_timeout}); bumping to {options.min_timeout}s")
+        logging.warning(
+            f"requested timeout < minimum ({options.min_timeout}); bumping to {options.min_timeout}s"
+        )
     if int(options.args.retries) < options.min_retries:
-        logging.warning(f"requested retries < minimum ({options.min_retries}); bumping to {options.min_retries}")
+        logging.warning(
+            f"requested retries < minimum ({options.min_retries}); bumping to {options.min_retries}"
+        )
     if int(options.args.workers) < options.min_workers:
-        logging.warning(f"requested workers < minimum ({options.min_workers}); bumping to {options.min_workers}")
+        logging.warning(
+            f"requested workers < minimum ({options.min_workers}); bumping to {options.min_workers}"
+        )
     options.timeout_per_step = max(options.min_timeout, float(options.args.timeout))
-    options.retries          = max(options.min_retries,   int(options.args.retries))
-    options.workers          = max(options.min_workers,   int(options.args.workers))
-    options.include_ipv6     =     bool(options.args.ipv6)
-    options.strict           =     bool(options.args.strict)
-    options.ignore_proxies   =     bool(options.args.ignore_proxies)
-    options.exit_code        = not bool(options.args.no_exit_code)
+    options.retries = max(options.min_retries, int(options.args.retries))
+    options.workers = max(options.min_workers, int(options.args.workers))
+    options.include_ipv6 = bool(options.args.ipv6)
+    options.strict = bool(options.args.strict)
+    options.ignore_proxies = bool(options.args.ignore_proxies)
+    options.exit_code = not bool(options.args.no_exit_code)
 
 
 def main() -> None:
-    """
-    Main function.
+    """Main function.
 
     Args:
         None
@@ -113,9 +149,11 @@ def main() -> None:
     options: Options = Options()
     parse_arguments(options)
 
-    logging.basicConfig(level=options.log_mode,
-                        format="%(asctime)s - %(levelname)s - %(message)s",
-                        datefmt="%Y-%m-%d %H:%M:%S")
+    logging.basicConfig(
+        level=options.log_mode,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
     online: bool = ek.is_internet_available(
         timeout_per_step=options.timeout_per_step,
