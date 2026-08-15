@@ -71,9 +71,12 @@ def determine_destination_path(url: str, dest_dir: str | os.PathLike[str]) -> Pa
 
     Returns:
         Path representing the full destination path for the downloaded file.
+        The returned path is always a direct child of dest_dir; a URL can
+        never steer the write outside of it.
 
     Raises:
-        None
+        ValueError: Propagated from urlparse() if url has a malformed
+                    authority, e.g. an unterminated IPv6 literal.
     """
     parsed = urlparse(url)
     # Take the name first, then decode: decoding first would let %2F inject a

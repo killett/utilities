@@ -68,6 +68,15 @@ def test_encoded_dot_dot_cannot_escape_either() -> None:
     )
 
 
+def test_dot_path_element_falls_back_instead_of_targeting_the_directory() -> None:
+    # "%2E" decodes to "."; without the "." clause of the guard the function
+    # returns DEST itself, handing ek.download_file a directory to write to.
+    assert (
+        download_file.determine_destination_path("https://example.com/a/%2E", DEST)
+        == DEST / "example.com"
+    )
+
+
 def test_encoded_separator_does_not_retarget_the_download() -> None:
     # Decoding before splitting would silently yield "b.bin" -- a different
     # file from the one the URL named.
