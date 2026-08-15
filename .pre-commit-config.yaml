@@ -1,0 +1,48 @@
+repos:
+  - repo: local
+    hooks:
+      # `python -m <tool>` dodges a macOS shebang-resolution problem with
+      # pixi-installed console scripts.
+      - id: ruff
+        name: ruff
+        entry: pixi run python -m ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff-format
+        entry: pixi run python -m ruff format
+        language: system
+        types: [python]
+      # Whole-repo on every commit, deliberately: a change in printall.py can
+      # break test_printall.py, and a staged-files-only run would miss it.
+      - id: mypy
+        name: mypy
+        entry: pixi run python -m mypy .
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      # Built-in pygrep — no remote pre-commit-hooks dep, no network.
+      # Real conflict markers: `<<<<<<< <ref>` and `>>>>>>> <ref>` (with
+      # trailing space) and `=======` *alone on a line*. The bare-`=======`
+      # form would otherwise false-positive on pytest's `======== … ========`
+      # header lines, so it is anchored with $.
+      - id: check-merge-conflict
+        name: check-merge-conflict
+        entry: '^(<<<<<<< |>>>>>>> |={7}$)'
+        language: pygrep
+
+      # Local reimplementation of pre-commit-hooks' check-added-large-files
+      # (default maxkb=500 → 500000 bytes). System bash + wc only.
+      - id: check-added-large-files
+        name: check-added-large-files (limit 500 KB)
+        entry: 'bash -c ''max=500000; rc=0; for f in "$@"; do sz=$(wc -c < "$f"); if (( sz > max )); then echo "$f: $sz bytes exceeds limit of $max" >&2; rc=1; fi; done; exit $rc'' --'
+        language: system
+
+      # Local reimplementation of pre-commit-hooks' check-toml. tomllib is
+      # stdlib in 3.11+; this repo requires 3.12+.
+      - id: check-toml
+        name: check-toml
+        entry: 'pixi run python -c ''import sys,tomllib;[tomllib.load(open(f,"rb")) for f in sys.argv[1:]]'''
+        language: system
+        types: [toml]
