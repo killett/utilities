@@ -23,6 +23,9 @@ venv/
 .venv/
 env/
 
+# emmykit's configure_logging() writes here, relative to the cwd
+logs/
+
 # Editors / OS
 .idea/
 .vscode/
