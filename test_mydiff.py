@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import emmykit as ek
-import mydiff
 import pytest
+
+import mydiff
 
 # One recorded ek.my_diff() call: its positional args and its keyword args.
 DiffCalls = list[tuple[tuple[Any, ...], dict[str, Any]]]

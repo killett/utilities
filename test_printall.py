@@ -6,8 +6,9 @@ import sys
 from pathlib import Path
 
 import emmykit as ek
-import printall
 import pytest
+
+import printall
 
 MULTILINE_CALL = """import logging
 

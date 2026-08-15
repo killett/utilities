@@ -5,8 +5,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import multireplace
 import pytest
+
+import multireplace
 
 
 def test_glob_pattern_defaults_to_everything(
