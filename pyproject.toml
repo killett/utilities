@@ -35,6 +35,11 @@ convention = "google"
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+# ruff format rewrites ```python blocks inside Markdown. The specs and plans
+# under docs/ quote deliberately-unformatted "before" code — a kitchen-sink
+# import shown on one line, an example whose whole point is a trailing space —
+# and formatting them destroys what they document.
+exclude = ["*.md"]
 
 [tool.mypy]
 strict = true
