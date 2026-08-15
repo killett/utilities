@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Download all .torrent files linked from a given web page.
+"""Download all .torrent files linked from a given web page.
 
 Usage:
   python scrape_torrents.py https://example.com/page-with-links
@@ -14,12 +13,12 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Set
-from urllib.parse import urljoin, urlparse, unquote
+from urllib.parse import unquote, urljoin, urlparse
+
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse
 
 __version__: str = "1.1.1"
 
@@ -29,27 +28,47 @@ class Options:
 
     def __init__(self) -> None:
         """Initialize the Options class with default values."""
-        self.my_name:          str = Path(sys.argv[0]).stem  # The invoked name of this script without the extension
-        self.log_mode: int = logging.INFO  # Use the --debug command line argument to change to DEBUG.
+        # The invoked name of this script, without the .py extension.
+        self.my_name: str = Path(sys.argv[0]).stem
+        # Use the --debug command line argument to change to DEBUG.
+        self.log_mode: int = logging.INFO
         self.args: argparse.Namespace = argparse.Namespace()
         # self.default_out_dir = Path("~").expanduser() / "Desktop" / "ADD_TORRENTS_HERE_TO_DOWNLOAD"
-        self.default_out_dir: Path = Path("~").expanduser() / "Desktop" / "torrents_temp"
-        self.default_keyword: str | None = None  # Default keyword to search for in links, if any.
+        self.default_out_dir: Path = (
+            Path("~").expanduser() / "Desktop" / "torrents_temp"
+        )
+        # Default keyword to search for in links, if any.
+        self.default_keyword: str | None = None
 
 
 def parse_arguments(options: Options) -> None:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(description=f"Read a web page and download all linked .torrent files.  {options.my_name} version {__version__}")
-    parser.add_argument("url", type=str, metavar="URL_OR_FILE",
-                        help="Web page URL (http/https) or path to a local HTML file (or file:// URI).")
-    parser.add_argument("--out", type=Path, default=options.default_out_dir,
-                        help=f"Output directory (default: {options.default_out_dir}).")
-    parser.add_argument("--keyword", default=options.default_keyword,
-                        help=f"Keyword to search for in links (default: {options.default_keyword}).")
-    parser.add_argument("-v", "--version",
-                        action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("-d", "--debug", action="store_true",
-                        help="Enable debug logging.")
+    parser = argparse.ArgumentParser(
+        description=f"Read a web page and download all linked .torrent files.  {options.my_name} version {__version__}"
+    )
+    parser.add_argument(
+        "url",
+        type=str,
+        metavar="URL_OR_FILE",
+        help="Web page URL (http/https) or path to a local HTML file (or file:// URI).",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=options.default_out_dir,
+        help=f"Output directory (default: {options.default_out_dir}).",
+    )
+    parser.add_argument(
+        "--keyword",
+        default=options.default_keyword,
+        help=f"Keyword to search for in links (default: {options.default_keyword}).",
+    )
+    parser.add_argument(
+        "-v", "--version", action="version", version=f"%(prog)s {__version__}"
+    )
+    parser.add_argument(
+        "-d", "--debug", action="store_true", help="Enable debug logging."
+    )
     options.args = parser.parse_args()
 
     if options.args.debug:
@@ -62,15 +81,17 @@ def parse_arguments(options: Options) -> None:
 
 def looks_like_http_url(s: str) -> bool:
     """Check if a string looks like an HTTP or HTTPS URL.
+
     This is a basic check, not a full URL validation.
     """
     return s.casefold().startswith(("http://", "https://"))
 
 
 def read_html_from_source(source: str, timeout: int = 20) -> tuple[str, str]:
-    """
-    Returns (html, base_url). If 'source' is a local file path or file:// URL,
-    reads from disk and uses a file:// base; otherwise fetches over HTTP(S).
+    """Return (html, base_url) for a local file, a file:// URL or an HTTP(S) URL.
+
+    A local file path or file:// URL is read from disk and gets a file:// base;
+    anything else is fetched over HTTP(S).
     """
     parsed = urlparse(source)
 
@@ -111,8 +132,8 @@ def get_page_html(url: str, timeout: int = 20) -> str:
 
 
 def is_torrent_url(href: str) -> bool:
-    """
-    Decide whether a link points to a .torrent file.
+    """Decide whether a link points to a .torrent file.
+
     Checks the URL path (ignoring querystring and fragment).
     """
     parsed = urlparse(href)
@@ -122,14 +143,19 @@ def is_torrent_url(href: str) -> bool:
     return path_unquoted.lower().endswith(".torrent")
 
 
-def extract_torrent_links(html: str, base_url: str) -> Set[str]:
-    """
-    Parse HTML and extract all unique .torrent links, making them absolute URLs.
-    """
+def extract_torrent_links(html: str, base_url: str) -> set[str]:
+    """Parse HTML and extract all unique .torrent links as absolute URLs."""
     soup = BeautifulSoup(html, "html.parser")
-    links: Set[str] = set()
+    links: set[str] = set()
     for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
+        raw_href = a["href"]
+        if not isinstance(raw_href, str):
+            # BeautifulSoup returns a list for multi-valued attributes such as
+            # class. href is single-valued for every parser we use, so this
+            # only guards against markup no parser we have produces.
+            logging.debug("Skipping <a> with non-string href: %r", raw_href)
+            continue
+        href = raw_href.strip()
         absolute = urljoin(base_url, href)
         if is_torrent_url(absolute):
             links.add(absolute)
@@ -138,9 +164,7 @@ def extract_torrent_links(html: str, base_url: str) -> Set[str]:
 
 
 def safe_filename_from_url(file_url: str) -> str:
-    """
-    Derive a safe local filename from a URL.
-    """
+    """Derive a safe local filename from a URL."""
     parsed = urlparse(file_url)
     name = unquote(Path(parsed.path).name)
     # Basic safety: strip weird chars
@@ -150,9 +174,11 @@ def safe_filename_from_url(file_url: str) -> str:
     return name
 
 
-def download_file(url: str, dest_dir: str | os.PathLike[str], timeout: int = 60) -> Path:
-    """
-    Stream a single file to disk. Skips if already exists with nonzero size.
+def download_file(
+    url: str, dest_dir: str | os.PathLike[str], timeout: int = 60
+) -> Path:
+    """Stream a single file to disk, skipping it if it already has nonzero size.
+
     Returns the destination path.
     """
     dest_dir = Path(dest_dir).expanduser().resolve()
@@ -193,6 +219,7 @@ def download_file(url: str, dest_dir: str | os.PathLike[str], timeout: int = 60)
 
 def download_all(links: Iterable[str], out_dir: Path, keyword: str | None) -> None:
     """Download all files from the given set of links to the specified directory.
+
     Logs errors but continues downloading others.
     """
     count = 0
@@ -218,14 +245,19 @@ def main() -> None:
     """Main function."""
     options: Options = Options()
     parse_arguments(options)
-    logging.basicConfig(level=options.log_mode, format="%(levelname)s - %(asctime)s - %(message)s",
-                        datefmt="%Y-%m-%d %H:%M:%S")
-    url     = options.args.url
+    logging.basicConfig(
+        level=options.log_mode,
+        format="%(levelname)s - %(asctime)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    url = options.args.url
     out_dir = Path(options.args.out)
     keyword = options.args.keyword
 
     # Note for users: writing to /torrents may require elevated permissions.
-    if str(out_dir).startswith(os.sep) and not os.access(out_dir.parent or Path("/"), os.W_OK):
+    if str(out_dir).startswith(os.sep) and not os.access(
+        out_dir.parent or Path("/"), os.W_OK
+    ):
         logging.warning(
             "You may need elevated permissions to write to %s. "
             "Consider using a user-writable path with -out ./torrents",
