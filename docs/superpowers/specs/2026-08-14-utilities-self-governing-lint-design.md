@@ -322,7 +322,8 @@ convention.
 
 | # | Commit | Gate |
 | --- | --- | --- |
-| 1 | `chore: add pyproject.toml and pixi.toml, ignore .pixi/` | `pixi install` succeeds and `pixi.lock` covers all three platforms; `pixi run lint` reports **exactly the same 33 findings** as the outer config did |
+| 1 | `chore: add pyproject.toml and pixi.toml, ignore .pixi/` | `pixi install` succeeds and `pixi.lock` covers all three platforms; `pixi run lint` reports **exactly 37 findings** — see the correction note below |
+| 1b | `tests: style: regroup sibling-script imports as first-party` | 37 → 33; `pytest` still reports 35 passed; only import blocks change |
 | 2 | `chore: add pre-commit config and install the hook` | `pixi run pre-commit-install`, then commit — the whole-repo `mypy` hook must pass |
 | 3 | `download_file.py: refactor: drop dead imports and asserts` | 33 → 5 findings; `python download_file.py --help` returns 0 |
 | 4 | `check_internet.py: docs: fix docstring summary placement` | 5 → 2; `--help` returns 0 |
@@ -334,9 +335,24 @@ convention.
 The commit-5 gate is the falsifiable form of the claim that the file was never a
 test. If the count moves off 35, that claim was wrong.
 
-Commit 1's "exactly 33" gate is the guard against the new configuration silently
-diverging from the old one. A different number means reconciling before anything
-is built on top.
+Commit 1's finding-count gate is the guard against the new configuration
+silently diverging from the old one. A different number means reconciling
+before anything is built on top.
+
+**Correction, found while executing commit 1.** That gate originally read
+"exactly 33". The real number is 37, and this document was wrong rather than
+the implementation. Moving the config into `utilities/` changes ruff's isort
+project root: under `/workspace/pyproject.toml`, `src` resolved to a directory
+containing no `printall.py`, so `import printall` was classified third-party
+and sorted next to `pytest`; under the in-tree config, `src` resolves here,
+where the script does exist, so it is first-party and belongs in its own
+block. Four test modules import a sibling script and are affected —
+`test_printall.py`, `test_mydiff.py`, `test_multireplace.py` and
+`test_treeview.py`. The new grouping is the more correct one; the original 33
+was measured under a config that misclassified these imports. Commit 1b
+applies the four `ruff --fix` auto-fixes, after which the count is 33 and
+every later gate in the table holds as written. This is the one exception to
+the out-of-scope note that no `test_*.py` would be touched.
 
 Two edits sit outside this sequence and should not be looked for in it. This
 spec is committed to `utilities/` before commit 1, which is what introduces the

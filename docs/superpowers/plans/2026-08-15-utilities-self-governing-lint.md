@@ -14,7 +14,8 @@
 - conda-forge is the only conda channel. PyPI only for packages with no conda-forge build (`emmykit`).
 - Never commit code that fails a hook. If the `ruff --fix` hook rewrites a staged file, re-add and retry — that is expected, not breakage.
 - Do not modify the five adopted scripts (`printall.py`, `mydiff.py`, `myaudit.py`, `multireplace.py`, `treeview.py`), `download_torrents.py`, or any `test_*.py`. They are already clean; touching them is out of scope.
-- The finding count is the running gate: 33 → 5 → 2 → 0. If a task's count does not match, stop and reconcile before proceeding.
+- The finding count is the running gate: 37 → 33 → 5 → 2 → 0. If a task's count does not match, stop and reconcile before proceeding. (See "Correction discovered during Task 1" below for why the first number is 37 and not 33.)
+- Do not modify any `test_*.py` **except** the four import regroupings in Task 1b, which the new config's isort root makes mandatory.
 
 **User decisions (already made):**
 - "Self-governing" — `utilities/` carries its own `pyproject.toml`, `.pre-commit-config.yaml` and dependency declarations. Do not leave config in `/workspace`.
@@ -36,6 +37,24 @@ The spec predicted that `ruff format` would mangle long trailing comments in `ch
 
 Task 6 therefore formats only `detect_country.py`: Tasks 3, 4 and 5 each stage a file, and the `ruff-format` hook formats staged files, so by Task 6 `detect_country.py` is the only unformatted file left.
 
+## Correction discovered during Task 1
+
+The plan originally gated Task 1 on `pixi run lint` reporting exactly 33 findings. The real number is **37**, and the plan was wrong rather than the implementation.
+
+Moving the config into `utilities/` changes ruff's isort project root. With the config at `/workspace/pyproject.toml`, `src` resolved to `/workspace`, which contains no `printall.py`, so `import printall` was classified third-party and sorted alongside `pytest`. With the config at `utilities/pyproject.toml`, `src` resolves to `utilities/`, where `printall.py` does exist, so it is correctly first-party and belongs in its own block:
+
+```diff
+ import emmykit as ek
+-import printall
+ import pytest
+
++import printall
+```
+
+Four files import a sibling script and are affected: `test_printall.py`, `test_mydiff.py`, `test_multireplace.py`, `test_treeview.py`. The per-rule breakdown is otherwise identical to the original measurement, and the new grouping is the more correct one — the original 33 was measured under a config that was misclassifying these imports.
+
+Per the user's ruling, Task 1 commits configuration only and gates on 37; the four auto-fixes land in a separate Task 1b, after which the count is 33 and every downstream gate holds as originally planned.
+
 ---
 
 ## File Structure
@@ -46,6 +65,7 @@ Task 6 therefore formats only `detect_country.py`: Tasks 3, 4 and 5 each stage a
 | `pixi.toml` | Environment: channels, platforms, flat dependency table, `[tasks]`. | 1 (create) |
 | `pixi.lock` | Exact resolved builds for all three platforms. Committed. | 1 (generated) |
 | `.gitignore` | Add `.pixi/`. | 1 (modify) |
+| `test_printall.py`, `test_mydiff.py`, `test_multireplace.py`, `test_treeview.py` | Import-block regrouping only, forced by the new isort root. | 1b (modify) |
 | `.pre-commit-config.yaml` | Six local hooks, all via `pixi run python -m <tool>`. | 2 (create) |
 | `download_file.py` | 28 of the 33 findings. | 3 (modify) |
 | `check_internet.py` | 3 findings. | 4 (modify) |
@@ -70,13 +90,13 @@ Task 6 therefore formats only `detect_country.py`: Tasks 3, 4 and 5 each stage a
 **Acceptance Criteria:**
 - [ ] `pixi install` succeeds and writes `pixi.lock`
 - [ ] `pixi.lock` contains solved packages for `linux-64`, `osx-arm64` and `osx-64`
-- [ ] `pixi run lint` reports exactly `Found 33 errors.`
-- [ ] `pixi run python -m ruff check test_printall.py` reports `All checks passed!`, proving the `test_*.py` per-file-ignore pattern actually matches
+- [ ] `pixi run lint` reports exactly `Found 37 errors.`
+- [ ] `pixi run python -m ruff check test_printall.py --statistics` reports `1 I001` and nothing else — proving the `test_*.py` per-file-ignore pattern matches (no `ANN`, `D` or `S` findings in a file full of bare `assert`s), while the single `I001` is the expected first-party reclassification that Task 1b fixes
 - [ ] `pixi run typecheck` reports `Success: no issues found in 16 source files`
 - [ ] `pixi run test` reports `35 passed`
 - [ ] `.pixi/` is gitignored and `pixi.lock` is committed
 
-**Verify:** `cd /workspace/utilities && pixi run lint 2>&1 | tail -2` → `Found 33 errors.`
+**Verify:** `cd /workspace/utilities && pixi run lint 2>&1 | tail -2` → `Found 37 errors.`
 
 **Steps:**
 
@@ -220,19 +240,22 @@ Expected: all three of `linux-64:`, `osx-arm64:` and `osx-64:` appear. The solve
 
 ```bash
 cd /workspace/utilities && pixi run lint 2>&1 | tail -2
+pixi run lint --statistics 2>&1 | tail -10
 ```
 
-Expected: `Found 33 errors.`
+Expected: `Found 37 errors.`, broken down as 18 `F401`, 7 `I001`, 6 `D212`, 2 `S101`, 2 `UP035`, 1 `UP039`, 1 `W291`.
 
-This is the guard against silent config divergence. A different number means the new `pyproject.toml` is not equivalent to the outer scaffold's — reconcile now, before anything is built on top. In particular, a count near 180 means the `test_*.py` per-file-ignore did not match.
+This is the guard against silent config divergence. A count near 180 means the `test_*.py` per-file-ignore did not match. Any other mismatch means the new `pyproject.toml` is not equivalent to the outer scaffold's — reconcile before anything is built on top.
+
+Four of the seven `I001` findings are the expected first-party reclassification described under "Correction discovered during Task 1"; they are fixed in Task 1b, not here.
 
 - [ ] **Step 7: Confirm the per-file-ignore pattern matches**
 
 ```bash
-cd /workspace/utilities && pixi run python -m ruff check test_printall.py
+cd /workspace/utilities && pixi run python -m ruff check test_printall.py --statistics
 ```
 
-Expected: `All checks passed!` — that file is full of bare `assert`s, so `S101` firing here would mean the pattern missed.
+Expected: `1  I001` and nothing else. That file is full of bare `assert`s and undocumented functions, so any `S101`, `D` or `ANN` finding here would mean the pattern missed. The lone `I001` is expected.
 
 - [ ] **Step 8: Confirm mypy and pytest still pass under the local config**
 
@@ -263,6 +286,94 @@ Two settings from the scaffold are deliberately not carried over: the
 mypy overrides block for tests.* never matched anything here (mypy
 rejects test_* patterns and this repo's tests are flat), and mypy_path
 is meaningless without a src/ layout."
+```
+
+---
+
+### Task 1b: Regroup first-party imports in four test modules
+
+**Goal:** Apply the four `I001` auto-fixes that Task 1's config change made mandatory, bringing the count to the 33 the rest of the plan assumes.
+
+Added during execution — see "Correction discovered during Task 1". These are `ruff check --fix` auto-fixes with no judgement involved. This task is the sole exception to the global constraint against modifying `test_*.py`.
+
+**Files:**
+- Modify: `/workspace/utilities/test_printall.py`
+- Modify: `/workspace/utilities/test_mydiff.py`
+- Modify: `/workspace/utilities/test_multireplace.py`
+- Modify: `/workspace/utilities/test_treeview.py`
+
+**Acceptance Criteria:**
+- [ ] `pixi run lint` → `Found 33 errors.`
+- [ ] All four files show `import <sibling>` in its own block, after the third-party block
+- [ ] `pixi run test` → `35 passed`
+- [ ] `pixi run typecheck` → `Success: no issues found in 16 source files`
+- [ ] No test file is changed other than its import block
+
+**Verify:** `cd /workspace/utilities && pixi run lint 2>&1 | tail -2 && pixi run test 2>&1 | tail -2` → `Found 33 errors.` and `35 passed`
+
+**Steps:**
+
+- [ ] **Step 1: Apply the auto-fixes**
+
+```bash
+cd /workspace/utilities
+pixi run python -m ruff check --fix test_printall.py test_mydiff.py test_multireplace.py test_treeview.py
+```
+
+Expected: `Found 4 errors (4 fixed, 0 remaining).`
+
+Each file's import block goes from this shape:
+
+```python
+import emmykit as ek
+import printall
+import pytest
+```
+
+to this:
+
+```python
+import emmykit as ek
+import pytest
+
+import printall
+```
+
+`test_multireplace.py` and `test_treeview.py` have the same shape with `multireplace` / `treeview` in place of `printall`; `test_mydiff.py` with `mydiff`.
+
+- [ ] **Step 2: Confirm nothing but imports moved**
+
+```bash
+cd /workspace/utilities && git diff --stat
+```
+
+Expected: four files, and the changed-line count is small — each file is one import moved plus one blank line. If any file shows a large diff, something other than the import regrouping happened; stop and investigate.
+
+- [ ] **Step 3: Confirm the count and that the tests still pass**
+
+```bash
+cd /workspace/utilities
+pixi run lint 2>&1 | tail -2          # Found 33 errors.
+pixi run test 2>&1 | tail -2          # 35 passed
+pixi run typecheck 2>&1 | tail -2     # Success: no issues found in 16 source files
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /workspace/utilities
+git add test_printall.py test_mydiff.py test_multireplace.py test_treeview.py
+git commit -m "tests: style: regroup sibling-script imports as first-party
+
+Moving the ruff config into this repo changed isort's project root.
+Under /workspace/pyproject.toml, src resolved to a directory with no
+printall.py, so 'import printall' was classified third-party and sorted
+next to pytest. Under the in-tree config, src resolves here, where the
+script does exist, so it is first-party and belongs in its own block.
+
+Four test modules import a sibling script and are affected. These are
+ruff --fix auto-fixes; no test logic changed and the suite still
+reports 35 passed."
 ```
 
 ---
