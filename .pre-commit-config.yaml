@@ -15,11 +15,14 @@ repos:
         types: [python]
       # Whole-repo on every commit, deliberately: a change in printall.py can
       # break test_printall.py, and a staged-files-only run would miss it.
+      # always_run (rather than types: [python]) is what makes that literally
+      # true — otherwise a commit touching only pyproject.toml could relax
+      # `strict = true` and never be type-checked.
       - id: mypy
         name: mypy
         entry: pixi run python -m mypy .
         language: system
-        types: [python]
+        always_run: true
         pass_filenames: false
 
       # Built-in pygrep — no remote pre-commit-hooks dep, no network.

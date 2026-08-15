@@ -9,8 +9,7 @@ select = [
     "F",    # Pyflakes — unused imports, undefined names
     "E",    # pycodestyle errors
     "W",    # pycodestyle warnings
-    "B",    # flake8-bugbear
-    "B9",   # bugbear opinionated rules
+    "B",    # flake8-bugbear (ruff has no separate B9 tier; "B" covers B9xx)
     "UP",   # pyupgrade
     "I",    # isort
     "ANN",  # flake8-annotations
@@ -56,4 +55,7 @@ pythonpath = ["."]  # flat layout: tests import the scripts as top-level modules
 
 [tool.coverage.run]
 source = ["."]
-omit = ["test_*.py", "demo_*.py", "_template.py"]
+# ".pixi/*" matters: coverage does not read .gitignore, and this env's stdlib
+# is not under site-packages, so without it the whole conda stdlib is measured
+# and the total is ~35000 statements of other people's code.
+omit = ["test_*.py", "demo_*.py", "_template.py", ".pixi/*"]

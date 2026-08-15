@@ -54,6 +54,9 @@ def main() -> None:
         level=options.log_mode,
         format="%(asctime)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+        # emmykit installs a root handler at import time, which makes a
+        # plain basicConfig() a silent no-op -- level and format both ignored.
+        force=True,
     )
     logging.info("Replace this with the real work of %s.", options.my_name)
     logging.shutdown()

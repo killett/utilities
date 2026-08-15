@@ -53,8 +53,9 @@ python multireplace.py old_name new_name '*.py' --dir src --recursive
 python myaudit.py some_module.py
 ```
 
-Every script with an `argparse` interface supports `--help`, `-v`/`--version`
-and `-debug`.
+Every script with an `argparse` interface supports `--help` and
+`-v`/`--version`. All of them take `--debug`; the short form is `-debug`
+except in `download_file.py` and `download_torrents.py`, which use `-d`.
 
 ## Project structure
 
