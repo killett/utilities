@@ -1,0 +1,54 @@
+[project]
+name = "utilities"
+version = "0.1.0"  # PEP 621 requires it. Kept even without [build-system] so any
+                   # uv-using tool that walks into this directory still validates.
+requires-python = ">=3.12,<3.14"
+
+[tool.ruff.lint]
+select = [
+    "F",    # Pyflakes — unused imports, undefined names
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "B",    # flake8-bugbear
+    "B9",   # bugbear opinionated rules
+    "UP",   # pyupgrade
+    "I",    # isort
+    "ANN",  # flake8-annotations
+    "D",    # pydocstyle
+    "S",    # bandit
+]
+ignore = [
+    "E501",    # line length is ruff format's job
+    "D100",    # module docstring — these are scripts, not library modules
+    "ANN204",  # return type annotation on __init__
+]
+
+# A pattern with no path separator matches the basename. The scaffold's version
+# used "**/test_*.py" because the files sat one directory down; here they are at
+# the repo root. Task 1 verifies the pattern actually matches.
+[tool.ruff.lint.per-file-ignores]
+"test_*.py" = ["ANN", "D", "S"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+# Deliberately no [[tool.mypy.overrides]] for tests: mypy rejects patterns like
+# "test_*" ("Patterns must be fully-qualified module names"), and this repo's
+# tests are flat rather than under tests/. They carry real annotations instead.
+# Deliberately no mypy_path: there is no src/ layout.
+
+[tool.pytest.ini_options]
+addopts = "-v"
+pythonpath = ["."]  # flat layout: tests import the scripts as top-level modules
+
+[tool.coverage.run]
+source = ["."]
+omit = ["test_*.py", "demo_*.py", "_template.py"]

@@ -32,3 +32,9 @@ logs/
 .DS_Store
 *.swp
 *~
+
+# pixi environment (pixi.lock IS committed — it is what makes the env reproducible)
+.pixi/
+
+# scratch workspace for plan execution
+.superpowers/
