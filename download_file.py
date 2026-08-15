@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import emmykit as ek
 
@@ -75,23 +75,23 @@ def determine_destination_path(url: str, dest_dir: str | os.PathLike[str]) -> Pa
     Raises:
         None
     """
-    dest_dir_path: Path = Path(dest_dir)
-
     parsed = urlparse(url)
-    url_path = Path(parsed.path) if parsed.path else Path()
-    candidate = url_path.name
+    # Take the name first, then decode: decoding first would let %2F inject a
+    # separator and silently retarget the download.
+    candidate = unquote(Path(parsed.path).name) if parsed.path else ""
 
-    if not candidate:
-        # Fall back to host name, then to a generic name.
+    # "", "." and ".." are not usable filenames, and ".." would resolve
+    # outside dest_dir. A decoded separator is equally unusable. All fall back
+    # to the host, then to a generic timestamped name.
+    if candidate in {"", ".", ".."} or "/" in candidate or "\\" in candidate:
         import datetime as dt
 
         current_timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_name = parsed.netloc or f"download-{current_timestamp}"
-        candidate = base_name.replace("/", "_")
+        # hostname, not netloc: netloc carries userinfo and port, so a URL
+        # with credentials would write them into the filename.
+        candidate = parsed.hostname or f"download-{current_timestamp}"
 
-    dest_path: Path = dest_dir_path / candidate
-
-    return dest_path
+    return Path(dest_dir) / candidate
 
 
 def run_download(options: Options) -> None:
