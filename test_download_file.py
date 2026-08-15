@@ -94,6 +94,17 @@ def test_url_with_neither_path_nor_host_falls_back_to_a_timestamp() -> None:
     assert re.fullmatch(r"download-\d{8}_\d{6}", result.name), result.name
 
 
+def test_hostile_host_falls_back_to_a_timestamp_instead_of_escaping() -> None:
+    # hostname for "https://../a/.." is itself "..", so an unguarded fallback
+    # returns dest_dir/.., the parent of the download directory -- the same
+    # escape the path-candidate guard exists to close, reachable through the
+    # host instead of the path.
+    result = download_file.determine_destination_path("https://../a/..", DEST)
+
+    assert result.parent == DEST
+    assert re.fullmatch(r"download-\d{8}_\d{6}", result.name), result.name
+
+
 def test_destination_directory_argument_is_respected(tmp_path: Path) -> None:
     # Catches hardcoding Path.cwd() and ignoring the argument.
     a = download_file.determine_destination_path(

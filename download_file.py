@@ -88,8 +88,13 @@ def determine_destination_path(url: str, dest_dir: str | os.PathLike[str]) -> Pa
 
         current_timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         # hostname, not netloc: netloc carries userinfo and port, so a URL
-        # with credentials would write them into the filename.
-        candidate = parsed.hostname or f"download-{current_timestamp}"
+        # with credentials would write them into the filename. hostname needs
+        # the same guard as the path candidate: a URL like "https://../a/.."
+        # has hostname "..", which would otherwise escape dest_dir unchecked.
+        host = parsed.hostname or ""
+        if host in {"", ".", ".."} or "/" in host or "\\" in host:
+            host = ""
+        candidate = host or f"download-{current_timestamp}"
 
     return Path(dest_dir) / candidate
 
