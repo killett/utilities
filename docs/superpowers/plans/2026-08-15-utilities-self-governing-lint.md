@@ -228,11 +228,20 @@ Expected: succeeds, creates `pixi.lock` and `.pixi/`.
 - [ ] **Step 5: Confirm the lock covers all three platforms**
 
 ```bash
-cd /workspace/utilities && rg -c 'linux-64|osx-arm64|osx-64' pixi.lock
-rg -o '^  (linux-64|osx-arm64|osx-64):' pixi.lock | sort -u
+cd /workspace/utilities && head -5 pixi.lock
 ```
 
-Expected: all three of `linux-64:`, `osx-arm64:` and `osx-64:` appear. The solve itself is the macOS proof — no Mac is required.
+Expected — `pixi.lock` is format v7, whose header lists the solved platforms:
+
+```yaml
+version: 7
+platforms:
+- name: linux-64
+- name: osx-64
+- name: osx-arm64
+```
+
+The solve itself is the macOS proof — no Mac is required.
 
 `pixi.lock` is committed, so it passes through the `check-added-large-files` hook added in Task 2. For reference, the scaffold's lock is 227 KB against that hook's 500 KB limit, and this repo's dependency set is smaller — but if a future lock ever crosses it, raise the limit rather than gitignoring the lock.
 

@@ -8,7 +8,15 @@ shared entry point. Run one with `python <script>`.
 
 ## Installation
 
-Everything needs Python 3.12+ and `emmykit`:
+For development in this repository, everything is pinned in `pixi.toml` and
+`pixi.lock`:
+
+```bash
+pixi install
+```
+
+To run a single script standalone, outside this repo, it needs Python 3.12+
+and `emmykit`:
 
 ```bash
 pip install 'emmykit>=0.3.4'
@@ -62,8 +70,17 @@ and `-debug`.
 | `printall.py` | Search Python files and print full logical statements matching a pattern |
 | `treeview.py` | Print a tree view of a directory |
 | `clean-caches.sh` | Clear `__pycache__` directories and virtualenv caches |
+| `_template.py` | Starting point for a new script — copy, rename, fill in |
+| `demo_parse_datetime.py` | Runnable examples of `emmykit`'s datetime parsers (prints, no assertions) |
 
-Tests live alongside the scripts as `test_<script>.py` and run with `pytest`.
+Naming rules, enforced by convention rather than by tooling:
+
+- `test_*.py` — real pytest modules with assertions. Collected by `pixi run test`.
+- `demo_*.py` — runnable examples that print. Not collected, not covered.
+- `_template.py` — the skeleton for new scripts. Not collected, not covered.
+
+`docs/superpowers/` holds the design specs and implementation plans for larger
+changes.
 
 Scripts that use `emmykit`'s `configure_logging()` — `multireplace.py`,
 `myaudit.py`, `mydiff.py` and `treeview.py` — write a `logs/` directory into
